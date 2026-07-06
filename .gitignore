@@ -1,0 +1,28 @@
+﻿# Backend
+backend/node_modules/
+backend/.wrangler/
+backend/worker-configuration.d.ts
+backend/dev.vars
+
+# Flutter
+mobile/.dart_tool/
+mobile/.packages
+mobile/.pub/
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.metadata
+mobile/.idea/
+mobile/*.iml
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/ios/Flutter/Flutter.framework
+mobile/ios/Flutter/Flutter.podspec
+mobile/.vscode/
+
+# OS
+*.log
+.DS_Store
+Thumbs.db
