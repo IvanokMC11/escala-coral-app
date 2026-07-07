@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import '../services/database_service.dart';
 import 'home_screen.dart';
+import 'login_screen.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -36,16 +38,27 @@ class _SplashScreenState extends State<SplashScreen>
 
     _controller.forward();
 
-    Future.delayed(const Duration(milliseconds: 2500), () {
+    Future.delayed(const Duration(milliseconds: 1800), () {
       if (mounted) {
-        Navigator.of(context).pushReplacement(
-          PageRouteBuilder(
-            pageBuilder: (_, __, ___) => const HomeScreen(),
-            transitionsBuilder: (_, anim, __, child) =>
-                FadeTransition(opacity: anim, child: child),
-            transitionDuration: const Duration(milliseconds: 400),
-          ),
-        );
+        if (DatabaseService.isLoggedIn) {
+          Navigator.of(context).pushReplacement(
+            PageRouteBuilder(
+              pageBuilder: (_, __, ___) => const HomeScreen(),
+              transitionsBuilder: (_, anim, __, child) =>
+                  FadeTransition(opacity: anim, child: child),
+              transitionDuration: const Duration(milliseconds: 400),
+            ),
+          );
+        } else {
+          Navigator.of(context).pushReplacement(
+            PageRouteBuilder(
+              pageBuilder: (_, __, ___) => const LoginScreen(),
+              transitionsBuilder: (_, anim, __, child) =>
+                  FadeTransition(opacity: anim, child: child),
+              transitionDuration: const Duration(milliseconds: 400),
+            ),
+          );
+        }
       }
     });
   }
@@ -83,52 +96,25 @@ class _SplashScreenState extends State<SplashScreen>
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Container(
-                  width: 130,
-                  height: 130,
+                  width: 140,
+                  height: 140,
                   decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(30),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.3),
-                        blurRadius: 30,
-                        offset: const Offset(0, 10),
-                      ),
-                    ],
+                    shape: BoxShape.circle,
+                    boxShadow: [BoxShadow(color: Colors.white.withValues(alpha: 0.15), blurRadius: 60, spreadRadius: 10)],
                   ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(30),
-                    child: Image.asset('assets/icon.png', fit: BoxFit.cover, errorBuilder: (_, __, ___) => const Icon(Icons.music_note, size: 64, color: Color(0xFF6C3FB5))),
+                  child: Container(
+                    width: 130,
+                    height: 130,
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(30), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 30, offset: const Offset(0, 10))]),
+                    child: ClipRRect(borderRadius: BorderRadius.circular(30), child: Image.asset('assets/icon.png', fit: BoxFit.cover, errorBuilder: (_, __, ___) => const Icon(Icons.music_note, size: 64, color: Color(0xFF6C3FB5)))),
                   ),
                 ),
                 const SizedBox(height: 32),
-                const Text(
-                  'Scala Coral',
-                  style: TextStyle(
-                    fontSize: 36,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                    letterSpacing: 2,
-                  ),
-                ),
+                const Text('Scala Coral', style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white, letterSpacing: 2)),
                 const SizedBox(height: 8),
-                Text(
-                  'UNSAAC',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Colors.white.withValues(alpha: 0.9),
-                    letterSpacing: 4,
-                  ),
-                ),
+                Text('UNSAAC', style: TextStyle(fontSize: 16, color: Colors.white.withValues(alpha: 0.9), letterSpacing: 4)),
                 const SizedBox(height: 48),
-                SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white.withValues(alpha: 0.7),
-                  ),
-                ),
+                SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white.withValues(alpha: 0.7))),
               ],
             ),
           ),

@@ -1,4 +1,4 @@
-import 'dart:typed_data';
+import 'package:flutter/services.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
@@ -12,6 +12,9 @@ class PdfService {
     final pdf = pw.Document();
     final months = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre'];
     final monthName = months[month];
+
+    final sigBytes = (await rootBundle.load('assets/firma_jaide_ramirez.png')).buffer.asUint8List();
+    final sigImage = pw.MemoryImage(sigBytes);
 
     pdf.addPage(
       pw.MultiPage(
@@ -65,6 +68,8 @@ class PdfService {
               pw.Column(
                 crossAxisAlignment: pw.CrossAxisAlignment.center,
                 children: [
+                  pw.Image(sigImage, width: 100, height: 40),
+                  pw.SizedBox(height: 4),
                   pw.Text('____________________________'),
                   pw.Text('Firma del Presidente'),
                   pw.SizedBox(height: 4),
