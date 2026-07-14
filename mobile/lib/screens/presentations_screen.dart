@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:syncfusion_flutter_calendar/calendar.dart';
+import '../config/theme.dart';
 import '../services/database_service.dart';
+import '../services/notification_service.dart';
+import '../widgets/common.dart';
 
 class PresentationsScreen extends StatefulWidget {
   const PresentationsScreen({super.key});
@@ -11,17 +13,15 @@ class PresentationsScreen extends StatefulWidget {
 }
 
 class _PresentationsScreenState extends State<PresentationsScreen> {
-  late int _year, _month;
   List<Map<String, dynamic>> _presentations = [];
-  DateTime _selectedDate = DateTime.now();
   bool _loading = true;
+  bool _initialLoad = true;
+  String? _error;
+  int _filter = 0; // 0 = Próximas, 1 = Pasadas, 2 = Todas
 
   @override
   void initState() {
     super.initState();
-    final now = DateTime.now();
-    _year = now.year;
-    _month = now.month;
     _init();
   }
 
@@ -31,14 +31,29 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
-    _presentations = await DatabaseService.getPresentations(month: _month, year: _year);
-    setState(() => _loading = false);
+    setState(() { _loading = true; _error = null; });
+    try {
+      _presentations = await DatabaseService.getPresentations();
+    } catch (_) {
+      _error = 'Error al cargar presentaciones';
+    }
+    setState(() { _loading = false; _initialLoad = false; });
   }
 
   List<Map<String, dynamic>> get _filtered {
-    final sel = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    return _presentations.where((p) => p['date'] == sel).toList();
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final list = _presentations.where((p) {
+      final d = DateTime.tryParse(p['date'] ?? '');
+      if (_filter == 0) return d != null && !d.isBefore(today); // próximas
+      if (_filter == 1) return d != null && d.isBefore(today);  // pasadas
+      return true; // todas
+    }).toList();
+    // Próximas: la más cercana primero. Pasadas/Todas: la más reciente primero.
+    list.sort((a, b) => _filter == 0
+        ? (a['date'] as String).compareTo(b['date'] as String)
+        : (b['date'] as String).compareTo(a['date'] as String));
+    return list;
   }
 
   void _showCreate() {
@@ -58,14 +73,14 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
           padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
-            child: Form(
+            child: ModalWidthConstraint(child: Form(
               key: formKey,
               child: StatefulBuilder(
                 builder: (ctx, setDialogState) {
                   return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.withValues(alpha: 0.3), borderRadius: BorderRadius.circular(2)))),
                     const SizedBox(height: 20),
-                    const Text('Nueva presentacion', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const Text('Nueva presentación', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 20),
                     InkWell(
                       onTap: () async {
@@ -90,14 +105,15 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
                         if (!formKey.currentState!.validate()) return;
                         final dateStr = '${selectedDate.year}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
                         await DatabaseService.createPresentation(dateStr, timeCtrl.text.trim(), location: locCtrl.text.trim().isEmpty ? null : locCtrl.text.trim(), repertoire: repCtrl.text.trim().isEmpty ? null : repCtrl.text.trim());
+                        NotificationService.rescheduleAll();
                         Navigator.pop(ctx);
                         _load();
-                      }, child: const Text('Crear presentacion')),
+                      }, child: const Text('Crear presentación')),
                     ),
                   ]);
                 },
               ),
-            ),
+            )),
           ),
         );
       },
@@ -108,10 +124,10 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
     final closed = p['is_closed'] == 1;
     final presId = p['id'] as int;
 
-    if (closed) {
+    if (closed || !DatabaseService.isStaff) {
       final attendance = await DatabaseService.getPresentationAttendance(presId);
       if (!mounted) return;
-      _showAttendanceList(p, attendance, true);
+      _showAttendanceList(p, attendance, closed);
       return;
     }
 
@@ -141,7 +157,7 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
         builder: (ctx, setDialogState) {
           return Padding(
             padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-            child: SizedBox(
+            child: ModalWidthConstraint(child: SizedBox(
               height: MediaQuery.of(ctx).size.height * 0.7,
               child: Column(children: [
                 Padding(
@@ -172,7 +188,7 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
                     children: members.map((m) => Card(
                       margin: const EdgeInsets.only(bottom: 6),
                       child: CheckboxListTile(
-                        title: Text(m['name']),
+                        title: Text(m['name'], maxLines: 1, overflow: TextOverflow.ellipsis),
                         value: selectedStatus[m['id']] == 'present',
                         secondary: Container(
                           padding: const EdgeInsets.all(8),
@@ -189,16 +205,14 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
                   child: SizedBox(
                     width: double.infinity,
                     child: FilledButton(onPressed: () async {
-                      for (final entry in selectedStatus.entries) {
-                        await DatabaseService.markPresentationAttendance(entry.key, presId, entry.value);
-                      }
+                      await DatabaseService.markPresentationAttendanceBatch(presId, selectedStatus);
                       Navigator.pop(ctx);
                       _load();
                     }, child: const Text('Guardar asistencia')),
                   ),
                 ),
               ]),
-            ),
+            )),
           );
         },
       ),
@@ -212,7 +226,7 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) => Padding(
         padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        child: ModalWidthConstraint(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.withValues(alpha: 0.3), borderRadius: BorderRadius.circular(2)))),
           const SizedBox(height: 16),
           Row(children: [
@@ -220,6 +234,8 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
             if (closed) Chip(avatar: const Icon(Icons.lock, size: 14), label: const Text('Cerrada', style: TextStyle(fontSize: 12))),
           ]),
           const SizedBox(height: 12),
+          if (attendance.isEmpty)
+            Padding(padding: const EdgeInsets.symmetric(vertical: 16), child: Text('Aún no se registra asistencia', style: TextStyle(color: Theme.of(ctx).colorScheme.onSurface.withValues(alpha: 0.6)))),
           ...attendance.map((a) => Padding(
             padding: const EdgeInsets.only(bottom: 6),
             child: Row(children: [
@@ -228,128 +244,140 @@ class _PresentationsScreenState extends State<PresentationsScreen> {
               Expanded(child: Text(a['member_name'] ?? '', style: const TextStyle(fontSize: 15))),
             ]),
           )),
-        ]),
+        ])),
       ),
     );
-  }
-
-  void _onCalendarTap(CalendarTapDetails details) {
-    if (details.date != null) {
-      setState(() => _selectedDate = details.date!);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final items = _filtered;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Presentaciones', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
+        title: const Text('Presentaciones'),
         actions: DatabaseService.isStaff
-          ? [Container(margin: const EdgeInsets.only(right: 4), child: IconButton.filled(icon: const Icon(Icons.add), onPressed: _showCreate))]
-          : null,
+            ? [Container(margin: const EdgeInsets.only(right: 4), child: IconButton.filled(icon: const Icon(Icons.add), onPressed: _showCreate))]
+            : null,
       ),
-      body: _loading
-        ? const Center(child: CircularProgressIndicator())
-        : RefreshIndicator(
-            onRefresh: _load,
-            child: SingleChildScrollView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              child: Column(
-                children: [
-                  SfCalendar(
-                    view: CalendarView.month,
-                    initialSelectedDate: _selectedDate,
-                    onTap: _onCalendarTap,
-                    todayTextStyle: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold),
-                    headerStyle: CalendarHeaderStyle(
-                      textStyle: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: theme.colorScheme.onSurface),
-                    ),
-                    monthViewSettings: MonthViewSettings(
-                      showTrailingAndLeadingDates: false,
-                      dayFormat: 'EEE',
-                      monthCellStyle: MonthCellStyle(
-                        textStyle: TextStyle(color: theme.colorScheme.onSurface, fontSize: 13),
-                        leadingDatesTextStyle: TextStyle(color: theme.colorScheme.onSurfaceVariant, fontSize: 13),
-                        trailingDatesTextStyle: TextStyle(color: theme.colorScheme.onSurfaceVariant, fontSize: 13),
-                      ),
-                    ),
-                    dataSource: _PresentationDataSource(_presentations),
-                    backgroundColor: Colors.transparent,
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16),
-                    child: Divider(),
-                  ),
-                  if (_filtered.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 16),
-                      child: Column(children: [
-                        Icon(Icons.event_busy, size: 48, color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)),
-                        const SizedBox(height: 12),
-                        Text('Sin presentaciones en esta fecha', style: TextStyle(color: theme.colorScheme.onSurfaceVariant)),
-                      ]),
-                    )
-                  else
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Column(children: [
-                        Row(children: [
-                          Icon(Icons.star, size: 18, color: theme.colorScheme.primary),
-                          const SizedBox(width: 8),
-                          Text(DateFormat("d 'de' MMMM", 'es').format(_selectedDate), style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: theme.colorScheme.onSurface)),
-                          Text(' (${_filtered.length})', style: TextStyle(color: theme.colorScheme.onSurfaceVariant)),
-                        ]),
-                        const SizedBox(height: 12),
-                        ..._filtered.map((p) {
-                          final closed = p['is_closed'] == 1;
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 10),
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(16),
-                              onTap: () => _showAttendance(p),
-                              child: Padding(
-                                padding: const EdgeInsets.all(14),
-                                child: Row(
-                                  children: [
-                                    Container(width: 46, height: 46, decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), color: closed ? Colors.green.withValues(alpha: 0.15) : theme.colorScheme.primaryContainer), child: Icon(closed ? Icons.lock : Icons.star, color: closed ? Colors.green : theme.colorScheme.onPrimaryContainer, size: 20)),
-                                    const SizedBox(width: 14),
-                                    Expanded(
-                                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                        Text('${p['time']}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                                        if (p['location'] != null) Text(p['location'], style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis),
-                                      ]),
-                                    ),
-                                    Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(borderRadius: BorderRadius.circular(8), color: closed ? Colors.green.withValues(alpha: 0.1) : Colors.orange.withValues(alpha: 0.1)), child: Text(closed ? 'Cerrada' : 'Abierta', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: closed ? Colors.green : Colors.orange))),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          );
-                        }),
-                      ]),
-                    ),
-                  const SizedBox(height: 16),
-                ],
-              ),
+      body: Column(
+        children: [
+          // ── Filtros tipo pestañas ──
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: Row(
+              children: [
+                _filterChip('Próximas', 0),
+                const SizedBox(width: 8),
+                _filterChip('Pasadas', 1),
+                const SizedBox(width: 8),
+                _filterChip('Todas', 2),
+              ],
             ),
           ),
+          Expanded(
+            child: _loading && _initialLoad
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                    ? ErrorRetry(message: _error!, onRetry: _load)
+                    : items.isEmpty
+                    ? const EmptyState(icon: Icons.event_note_outlined, title: 'Sin presentaciones', iconSize: 52)
+                    : RefreshIndicator(
+                        onRefresh: _load,
+                        child: ListView.builder(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                          itemCount: items.length,
+                          itemBuilder: (_, i) => _PresentationCard(p: items[i], onTap: () => _showAttendance(items[i])),
+                        ),
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _filterChip(String label, int value) {
+    final theme = Theme.of(context);
+    final selected = _filter == value;
+    return GestureDetector(
+      onTap: () => setState(() => _filter = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? theme.colorScheme.primary : theme.colorScheme.primary.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(label, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? Colors.white : theme.colorScheme.primary)),
+      ),
     );
   }
 }
 
-class _PresentationDataSource extends CalendarDataSource {
-  _PresentationDataSource(List<Map<String, dynamic>> presentations) {
-    appointments = presentations.map((p) {
-      final date = DateTime.tryParse(p['date']);
-      final closed = p['is_closed'] == 1;
-      return Appointment(
-        startTime: date ?? DateTime.now(),
-        endTime: (date ?? DateTime.now()).add(const Duration(hours: 2)),
-        subject: p['location'] ?? 'Presentacion',
-        color: closed ? Colors.green : Colors.purple,
-        isAllDay: true,
-      );
-    }).toList();
+class _PresentationCard extends StatelessWidget {
+  final Map<String, dynamic> p;
+  final VoidCallback onTap;
+  const _PresentationCard({required this.p, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final closed = p['is_closed'] == 1;
+    final date = DateTime.tryParse(p['date'] ?? '');
+    final dateStr = date != null
+        ? DateFormat("EEE d 'de' MMM", 'es').format(date).replaceFirstMapped(RegExp(r'^\w'), (m) => m[0]!.toUpperCase())
+        : (p['date']?.toString() ?? '');
+    final title = (p['location']?.toString().isNotEmpty == true) ? p['location'].toString() : 'Presentación';
+    final rep = p['repertoire']?.toString() ?? '';
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 46, height: 46,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  color: (closed ? AppColors.success : theme.colorScheme.primary).withValues(alpha: 0.15),
+                ),
+                child: Icon(closed ? Icons.verified_rounded : Icons.star_rounded, color: closed ? AppColors.success : theme.colorScheme.primary, size: 24),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      Expanded(child: Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(borderRadius: BorderRadius.circular(8), color: (closed ? AppColors.success : Colors.orange).withValues(alpha: 0.12)),
+                        child: Text(closed ? 'Cerrada' : 'Abierta', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: closed ? AppColors.success : Colors.orange)),
+                      ),
+                    ]),
+                    const SizedBox(height: 4),
+                    Row(children: [
+                      Icon(Icons.event, size: 13, color: theme.colorScheme.onSurface.withValues(alpha: 0.5)),
+                      const SizedBox(width: 4),
+                      Expanded(child: Text('$dateStr · ${p['time']}', style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurface.withValues(alpha: 0.6)), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                    ]),
+                    if (rep.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(rep, style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurface.withValues(alpha: 0.5)), maxLines: 2, overflow: TextOverflow.ellipsis),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

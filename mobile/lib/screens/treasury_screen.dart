@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/database_service.dart';
+import '../widgets/common.dart';
 
 class TreasuryScreen extends StatefulWidget {
   const TreasuryScreen({super.key});
@@ -13,9 +14,12 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
   late int _year, _month;
   List<Map<String, dynamic>> _transactions = [];
   List<Map<String, dynamic>> _memberDebts = [];
+  List<Map<String, dynamic>> _allMembers = [];
   List<Map<String, dynamic>> _filteredDebts = [];
   Map<String, double> _summary = {'total_income': 0, 'total_expense': 0, 'balance': 0};
   bool _loading = true;
+  bool _initialLoad = true;
+  String? _error;
   final _searchCtrl = TextEditingController();
 
   @override
@@ -46,12 +50,23 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
-    _transactions = await DatabaseService.getTreasury(month: _month, year: _year);
-    _summary = await DatabaseService.getTreasurySummary(month: _month, year: _year);
-    _memberDebts = await DatabaseService.getMemberDebts();
-    _filteredDebts = _memberDebts.where((d) => d['total_debt'] > 0).toList();
-    setState(() => _loading = false);
+    setState(() { _loading = true; _error = null; });
+    try {
+      final results = await Future.wait([
+        DatabaseService.getTreasury(month: _month, year: _year),
+        DatabaseService.getTreasurySummary(month: _month, year: _year),
+        DatabaseService.getMemberDebts(),
+        DatabaseService.getMembers(),
+      ]);
+      _transactions = results[0] as List<Map<String, dynamic>>;
+      _summary = results[1] as Map<String, double>;
+      _memberDebts = results[2] as List<Map<String, dynamic>>;
+      _allMembers = results[3] as List<Map<String, dynamic>>;
+      _filteredDebts = _memberDebts.where((d) => d['total_debt'] > 0).toList();
+    } catch (_) {
+      _error = 'Error al cargar tesorería';
+    }
+    setState(() { _loading = false; _initialLoad = false; });
   }
 
   void _changeMonth(int delta) {
@@ -66,7 +81,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
   void _addFine() {
     final amountCtrl = TextEditingController();
     final reasonCtrl = TextEditingController();
-    var selectedMember = _memberDebts.isNotEmpty ? _memberDebts.first['id'] as int : 0;
+    var selectedMember = _allMembers.isNotEmpty ? _allMembers.first['id'] as int : 0;
     final formKey = GlobalKey<FormState>();
 
     showModalBottomSheet(
@@ -80,7 +95,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
             padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
-              child: Form(
+              child: ModalWidthConstraint(child: Form(
                 key: formKey,
                 child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.withValues(alpha: 0.3), borderRadius: BorderRadius.circular(2)))),
@@ -89,7 +104,8 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
                   const SizedBox(height: 20),
                   DropdownButtonFormField<int>(
                     decoration: const InputDecoration(labelText: 'Miembro', prefixIcon: Icon(Icons.person)),
-                    items: _memberDebts.map((m) => DropdownMenuItem(value: m['id'] as int, child: Text(m['name']))).toList(),
+                    isExpanded: true,
+                    items: _allMembers.map((m) => DropdownMenuItem(value: m['id'] as int, child: Text(m['name'], overflow: TextOverflow.ellipsis))).toList(),
                     onChanged: (v) => setDialogState(() => selectedMember = v ?? 0),
                     initialValue: selectedMember,
                   ),
@@ -105,7 +121,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
                     _load();
                   }, child: const Text('Agregar multa'))),
                 ]),
-              ),
+              )),
             ),
           );
         },
@@ -123,7 +139,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Nuevo gasto'),
-        content: Form(
+        content: ModalWidthConstraint(maxWidth: 420, child: Form(
           key: formKey,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             TextFormField(controller: conceptCtrl, decoration: const InputDecoration(labelText: 'Concepto', prefixIcon: Icon(Icons.edit)), validator: (v) => v!.isEmpty ? 'Requerido' : null),
@@ -132,7 +148,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
             const SizedBox(height: 12),
             TextFormField(controller: descCtrl, decoration: const InputDecoration(labelText: 'Descripcion', prefixIcon: Icon(Icons.description))),
           ]),
-        ),
+        )),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
           FilledButton(onPressed: () async {
@@ -155,14 +171,14 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Fondo externo'),
-        content: Form(
+        content: ModalWidthConstraint(maxWidth: 420, child: Form(
           key: formKey,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             TextFormField(controller: conceptCtrl, decoration: const InputDecoration(labelText: 'Concepto', prefixIcon: Icon(Icons.edit)), validator: (v) => v!.isEmpty ? 'Requerido' : null),
             const SizedBox(height: 12),
             TextFormField(controller: amountCtrl, decoration: const InputDecoration(labelText: 'Monto (S/)', prefixIcon: Icon(Icons.attach_money)), keyboardType: TextInputType.number, validator: (v) => v!.isEmpty ? 'Requerido' : null),
           ]),
-        ),
+        )),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
           FilledButton(onPressed: () async {
@@ -210,8 +226,10 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
           ]),
         ],
       ),
-      body: _loading
+      body: _loading && _initialLoad
         ? const Center(child: CircularProgressIndicator())
+        : _error != null
+        ? ErrorRetry(message: _error!, onRetry: _load)
         : RefreshIndicator(
             onRefresh: _load,
             child: SingleChildScrollView(
@@ -220,33 +238,21 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(14), color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3)),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        IconButton(icon: const Icon(Icons.chevron_left), onPressed: () => _changeMonth(-1)),
-                        Text(monthName[0].toUpperCase() + monthName.substring(1), style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-                        IconButton(icon: const Icon(Icons.chevron_right), onPressed: () => _changeMonth(1)),
-                      ],
-                    ),
+                  MonthSelector(
+                    label: monthName[0].toUpperCase() + monthName.substring(1),
+                    onPrevious: () => _changeMonth(-1),
+                    onNext: () => _changeMonth(1),
                   ),
                   const SizedBox(height: 20),
                   Row(children: [
-                    _StatCard(theme: theme, icon: Icons.arrow_upward, label: 'Ingresos', value: 'S/ ${_summary['total_income']!.toStringAsFixed(2)}', color: Colors.green),
+                    StatCard(icon: Icons.arrow_upward, label: 'Ingresos', value: 'S/ ${_summary['total_income']!.toStringAsFixed(2)}', color: Colors.green),
                     const SizedBox(width: 8),
-                    _StatCard(theme: theme, icon: Icons.arrow_downward, label: 'Gastos', value: 'S/ ${_summary['total_expense']!.toStringAsFixed(2)}', color: Colors.red),
+                    StatCard(icon: Icons.arrow_downward, label: 'Gastos', value: 'S/ ${_summary['total_expense']!.toStringAsFixed(2)}', color: Colors.red),
                     const SizedBox(width: 8),
-                    _StatCard(theme: theme, icon: Icons.account_balance, label: 'Balance', value: 'S/ ${_summary['balance']!.toStringAsFixed(2)}', color: _summary['balance']! >= 0 ? Colors.green : Colors.red),
+                    StatCard(icon: Icons.account_balance, label: 'Balance', value: 'S/ ${_summary['balance']!.toStringAsFixed(2)}', color: _summary['balance']! >= 0 ? Colors.green : Colors.red),
                   ]),
                   const SizedBox(height: 24),
-                  Row(children: [
-                    Icon(Icons.people, size: 18, color: theme.colorScheme.primary),
-                    const SizedBox(width: 8),
-                    Text('Deudas de miembros', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
-                  ]),
+                  const SectionHeader(icon: Icons.people, label: 'Deudas de miembros', primaryColor: false),
                   const SizedBox(height: 8),
                   TextField(
                     controller: _searchCtrl,
@@ -283,7 +289,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
                             children: [
                               Expanded(
                                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  Text(d['name'], style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14)),
+                                  Text(d['name'], style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14), maxLines: 1, overflow: TextOverflow.ellipsis),
                                   Text('S/ ${total.toStringAsFixed(2)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: theme.colorScheme.error)),
                                 ]),
                               ),
@@ -294,11 +300,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
                       );
                     }),
                   const SizedBox(height: 24),
-                  Row(children: [
-                    Icon(Icons.receipt_long, size: 18, color: theme.colorScheme.primary),
-                    const SizedBox(width: 8),
-                    Text('Movimientos del mes', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
-                  ]),
+                  const SectionHeader(icon: Icons.receipt_long, label: 'Movimientos del mes', primaryColor: false),
                   const SizedBox(height: 12),
                   if (_transactions.isEmpty)
                     Card(
@@ -321,7 +323,7 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
                             decoration: BoxDecoration(shape: BoxShape.circle, color: (isIncome ? Colors.green : Colors.red).withValues(alpha: 0.15)),
                             child: Icon(isIncome ? Icons.arrow_upward : Icons.arrow_downward, color: isIncome ? Colors.green : Colors.red, size: 18),
                           ),
-                          title: Text(t['concept'] ?? '', style: const TextStyle(fontSize: 13)),
+                          title: Text(t['concept'] ?? '', style: const TextStyle(fontSize: 13), maxLines: 1, overflow: TextOverflow.ellipsis),
                           subtitle: Text(time, style: const TextStyle(fontSize: 11)),
                           trailing: Text('${isIncome ? '+' : '-'}S/ ${amount.toStringAsFixed(2)}', style: TextStyle(fontWeight: FontWeight.bold, color: isIncome ? Colors.green : Colors.red, fontSize: 14)),
                           dense: true,
@@ -333,33 +335,6 @@ class _TreasuryScreenState extends State<TreasuryScreen> {
               ),
             ),
           ),
-    );
-  }
-}
-
-class _StatCard extends StatelessWidget {
-  final ThemeData theme;
-  final IconData icon;
-  final String label;
-  final String value;
-  final Color color;
-  const _StatCard({required this.theme, required this.icon, required this.label, required this.value, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-          child: Column(children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(height: 6),
-            Text(label, style: TextStyle(fontSize: 10, color: theme.colorScheme.onSurfaceVariant)),
-            const SizedBox(height: 2),
-            Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: color)),
-          ]),
-        ),
-      ),
     );
   }
 }

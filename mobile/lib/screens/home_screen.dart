@@ -1,15 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:animations/animations.dart';
-import '../services/database_service.dart';
+import '../services/notification_service.dart';
 import '../widgets/animated_nav_bar.dart';
-import 'members_screen.dart';
+import 'dashboard_screen.dart';
 import 'rehearsals_screen.dart';
-import 'presentations_screen.dart';
 import 'attendance_matrix_screen.dart';
-import 'reports_screen.dart';
-import 'treasury_screen.dart';
-import 'settings_screen.dart';
-import 'my_attendance_screen.dart';
+import 'profile_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -26,32 +22,20 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    final isStaff = DatabaseService.isStaff;
-
-    final allScreens = <Widget>[
+    NotificationService.rescheduleAll();
+    _screens = <Widget>[
+      const DashboardScreen(),
       const RehearsalsScreen(),
-      const MembersScreen(),
-      const PresentationsScreen(),
       const AttendanceMatrixScreen(),
-      const ReportsScreen(),
-      if (isStaff) const TreasuryScreen(),
-      const MyAttendanceScreen(),
-      const SettingsScreen(),
+      const ProfileScreen(),
     ];
 
-    final allTabs = <NavTab>[
-      const NavTab(Icons.calendar_month_outlined, Icons.calendar_month, 'Ensayos'),
-      const NavTab(Icons.people_outlined, Icons.people, 'Miembros'),
-      const NavTab(Icons.star_outline, Icons.star, 'Present.'),
-      const NavTab(Icons.checklist_outlined, Icons.checklist, 'Asist.'),
-      const NavTab(Icons.bar_chart_outlined, Icons.bar_chart, 'Reportes'),
-      if (isStaff) const NavTab(Icons.account_balance_outlined, Icons.account_balance, 'Tesoro.'),
-      const NavTab(Icons.person_outline, Icons.person, 'Mi'),
-      const NavTab(Icons.settings_outlined, Icons.settings, 'Ajustes'),
+    _tabs = const <NavTab>[
+      NavTab(Icons.home_outlined, Icons.home, 'Inicio'),
+      NavTab(Icons.calendar_month_outlined, Icons.calendar_month, 'Ensayos'),
+      NavTab(Icons.checklist_outlined, Icons.checklist, 'Asist.'),
+      NavTab(Icons.person_outline, Icons.person, 'Perfil'),
     ];
-
-    _screens = allScreens;
-    _tabs = allTabs;
   }
 
   @override

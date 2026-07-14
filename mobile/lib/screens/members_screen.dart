@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/database_service.dart';
+import '../widgets/common.dart';
 
 class MembersScreen extends StatefulWidget {
   const MembersScreen({super.key});
@@ -12,6 +13,8 @@ class _MembersScreenState extends State<MembersScreen> {
   List<Map<String, dynamic>> _members = [];
   List<Map<String, dynamic>> _filtered = [];
   bool _loading = true;
+  bool _initialLoad = true;
+  String? _error;
   final _searchCtrl = TextEditingController();
 
   @override
@@ -27,10 +30,14 @@ class _MembersScreenState extends State<MembersScreen> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
-    _members = await DatabaseService.getMembers();
-    _filtered = _members;
-    setState(() => _loading = false);
+    setState(() { _loading = true; _error = null; });
+    try {
+      _members = await DatabaseService.getMembers(forceRefresh: true);
+      _filtered = _members;
+    } catch (_) {
+      _error = 'Error al cargar miembros';
+    }
+    setState(() { _loading = false; _initialLoad = false; });
   }
 
   void _filter(String q) {
@@ -65,7 +72,7 @@ class _MembersScreenState extends State<MembersScreen> {
             padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
-              child: Form(
+              child: ModalWidthConstraint(child: Form(
                 key: formKey,
                 child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.withValues(alpha: 0.3), borderRadius: BorderRadius.circular(2)))),
@@ -124,7 +131,7 @@ class _MembersScreenState extends State<MembersScreen> {
                     ),
                   ),
                 ]),
-              ),
+              )),
             ),
           );
         },
@@ -153,16 +160,16 @@ class _MembersScreenState extends State<MembersScreen> {
             ),
           ),
           Expanded(
-            child: _loading
+            child: _loading && _initialLoad
               ? const Center(child: CircularProgressIndicator())
-              : _filtered.isEmpty
-                ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(shape: BoxShape.circle, color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5)), child: Icon(Icons.people_outline, size: 56, color: theme.colorScheme.onSurfaceVariant)),
-                    const SizedBox(height: 20),
-                    Text(_searchCtrl.text.isEmpty ? 'Sin miembros' : 'Sin resultados', style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                    const SizedBox(height: 4),
-                    Text(_searchCtrl.text.isEmpty ? 'Agrega los miembros del coro' : 'Intenta con otro nombre', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7))),
-                  ]))
+              : _error != null
+                ? ErrorRetry(message: _error!, onRetry: _load)
+                : _filtered.isEmpty
+                ? EmptyState(
+                    icon: Icons.people_outline,
+                    title: _searchCtrl.text.isEmpty ? 'Sin miembros' : 'Sin resultados',
+                    subtitle: _searchCtrl.text.isEmpty ? 'Agrega los miembros del coro' : 'Intenta con otro nombre',
+                  )
                 : RefreshIndicator(
                     onRefresh: _load,
                     child: ListView.builder(
@@ -189,7 +196,7 @@ class _MembersScreenState extends State<MembersScreen> {
                                   Expanded(
                                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                                       Row(children: [
-                                        Expanded(child: Text(m['name'], style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15))),
+                                        Expanded(child: Text(m['name'], style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15), maxLines: 1, overflow: TextOverflow.ellipsis)),
                                         if ((m['beca_eligible'] ?? 1) == 0)
                                           Container(margin: const EdgeInsets.only(right: 4), padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: Colors.orange.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(8)), child: const Text('No beca', style: TextStyle(fontSize: 9, color: Colors.orange, fontWeight: FontWeight.bold))),
                                         if (m['cuerda']?.toString().isNotEmpty == true)

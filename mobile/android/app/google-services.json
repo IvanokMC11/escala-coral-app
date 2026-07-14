@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "530241995572",
+    "project_id": "scala-coral-aebf3",
+    "storage_bucket": "scala-coral-aebf3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:530241995572:android:209b866cc9d196aa14db61",
+        "android_client_info": {
+          "package_name": "com.escalacoral.escala_coral"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBtQv0pnAhotsT_Sh_HYngB7z3UMJnNPHc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

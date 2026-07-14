@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import '../services/database_service.dart';
+import '../widgets/common.dart';
+import '../widgets/location_picker.dart';
 import 'login_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -12,7 +15,10 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, String> _settings = {};
   List<Map<String, dynamic>> _users = [];
+  List<String> _authorizedEmails = [];
   bool _loading = true;
+  Position? _defaultLocation;
+  int _defaultRadius = 30;
 
   @override
   void initState() {
@@ -22,18 +28,88 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _load() async {
     setState(() => _loading = true);
-    _settings = await DatabaseService.getSettings();
-    if (DatabaseService.isStaff) _users = await DatabaseService.getUsers();
+    final results = await Future.wait([
+      DatabaseService.getSettings(),
+      DatabaseService.isStaff ? DatabaseService.getUsers() : Future.value(<Map<String, dynamic>>[]),
+      DatabaseService.isAdmin ? DatabaseService.getAuthorizedEmails() : Future.value(<String>[]),
+    ]);
+    _settings = results[0] as Map<String, String>;
+    _users = results[1] as List<Map<String, dynamic>>;
+    _authorizedEmails = results[2] as List<String>;
+    final lat = double.tryParse(_settings['default_rehearsal_lat'] ?? '');
+    final lng = double.tryParse(_settings['default_rehearsal_lng'] ?? '');
+    _defaultRadius = int.tryParse(_settings['default_rehearsal_radius'] ?? '') ?? 30;
+    _defaultLocation = (lat != null && lng != null)
+        ? Position(latitude: lat, longitude: lng, timestamp: DateTime.now(), accuracy: 0, altitude: 0, heading: 0, speed: 0, speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0)
+        : null;
     setState(() => _loading = false);
   }
 
-  void _edit(String key, String label) {
-    final ctrl = TextEditingController(text: _settings[key] ?? '');
+  Future<void> _saveDefaultLocation() async {
+    final pos = _defaultLocation;
+    if (pos == null) return;
+    await Future.wait([
+      DatabaseService.updateSetting('default_rehearsal_lat', pos.latitude.toString()),
+      DatabaseService.updateSetting('default_rehearsal_lng', pos.longitude.toString()),
+      DatabaseService.updateSetting('default_rehearsal_radius', _defaultRadius.toString()),
+    ]);
+    if (!mounted) return;
+    final apply = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ubicación guardada'),
+        content: const Text('¿Aplicar esta ubicación a los ensayos futuros que todavía no tienen ubicación asignada? Esto activa la validación de GPS en ellos.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('No, solo a los nuevos')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Aplicar ahora')),
+        ],
+      ),
+    );
+    if (apply == true) {
+      await DatabaseService.applyDefaultLocationToUpcomingRehearsals(pos.latitude, pos.longitude, _defaultRadius);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ubicación aplicada a los ensayos futuros sin ubicación')));
+      }
+    }
+    _load();
+  }
+
+  void _addAuthorizedEmail() {
+    final ctrl = TextEditingController();
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Editar $label'),
-        content: TextField(controller: ctrl, decoration: InputDecoration(labelText: label)),
+        title: const Text('Autorizar correo'),
+        content: ModalWidthConstraint(maxWidth: 420, child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Correo externo (fuera de @unsaac.edu.pe) que podrá iniciar sesión con Google.', style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 12),
+            TextField(controller: ctrl, autofocus: true, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'correo@ejemplo.com')),
+          ],
+        )),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+          FilledButton(onPressed: () async {
+            final email = ctrl.text.trim();
+            if (email.isEmpty || !email.contains('@')) return;
+            await DatabaseService.addAuthorizedEmail(email);
+            if (ctx.mounted) Navigator.pop(ctx);
+            _load();
+          }, child: const Text('Autorizar')),
+        ],
+      ),
+    );
+  }
+
+  void _edit(String key, String label, {String defaultValue = ''}) {
+    final ctrl = TextEditingController(text: _settings[key] ?? defaultValue);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Editar $label', maxLines: 1, overflow: TextOverflow.ellipsis),
+        content: ModalWidthConstraint(maxWidth: 420, child: TextField(controller: ctrl, decoration: InputDecoration(labelText: label))),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
           FilledButton(onPressed: () async {
@@ -70,21 +146,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(width: 14),
                     Expanded(
                       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(DatabaseService.currentUser?['email'] ?? 'Sin sesion', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                        Text('Rol: ${DatabaseService.currentUser?['role'] ?? '-'}', style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant)),
+                        Text(
+                          DatabaseService.currentUser?['email'] ?? 'Sin sesion',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Rol: ${DatabaseService.currentUser?['role'] ?? '-'}',
+                          style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ]),
                     ),
-                    FilledButton.tonalIcon(icon: const Icon(Icons.logout, size: 16), label: const Text('Salir'), onPressed: () async {
-                      await DatabaseService.logout();
-                      if (!context.mounted) return;
-                      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
-                    }),
                   ]),
                 ),
               ),
               if (DatabaseService.isAdmin && _users.isNotEmpty) ...[
                 const SizedBox(height: 16),
-                _SectionHeader(icon: Icons.admin_panel_settings, label: 'Usuarios'),
+                SectionHeader(icon: Icons.admin_panel_settings, label: 'Usuarios'),
                 const SizedBox(height: 8),
                 ..._users.map((u) => Card(
                   margin: const EdgeInsets.only(bottom: 6),
@@ -102,22 +184,131 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 )),
               ],
-              const SizedBox(height: 16),
-              _SectionHeader(icon: Icons.timer_outlined, label: 'Reglas de tardanza'),
-              const SizedBox(height: 12),
-              _SettingTile(theme: theme, icon: Icons.hourglass_bottom, label: 'Minutos de tolerancia', value: '${_settings['grace_period_minutes']} min', onTap: () => _edit('grace_period_minutes', 'Minutos de tolerancia')),
-              _SettingTile(theme: theme, icon: Icons.attach_money, label: 'Multa por minuto', value: 'S/ ${_settings['fine_per_minute']}', onTap: () => _edit('fine_per_minute', 'Multa por minuto (S/)')),
-              const SizedBox(height: 28),
-              _SectionHeader(icon: Icons.star_outline, label: 'Presentaciones'),
-              const SizedBox(height: 12),
-              _SettingTile(theme: theme, icon: Icons.exposure_plus_1, label: 'Valor en asistencias', value: '${_settings['presentation_weight']} asistencias', onTap: () => _edit('presentation_weight', 'Valor en asistencias')),
-              const SizedBox(height: 28),
-              _SectionHeader(icon: Icons.schedule, label: 'Horarios de ensayo'),
-              const SizedBox(height: 12),
-              _SettingTile(theme: theme, icon: Icons.sunny, label: 'Lunes', value: '${_settings['schedule_monday_start']} - ${_settings['schedule_monday_end']}', onTap: () => _edit('schedule_monday_start', 'Lunes inicio')),
-              _SettingTile(theme: theme, icon: Icons.cloud, label: 'Miercoles', value: '${_settings['schedule_wednesday_start']} - ${_settings['schedule_wednesday_end']}', onTap: () => _edit('schedule_wednesday_start', 'Miercoles inicio')),
-              _SettingTile(theme: theme, icon: Icons.nights_stay, label: 'Viernes', value: '${_settings['schedule_friday_start']} - ${_settings['schedule_friday_end']}', onTap: () => _edit('schedule_friday_start', 'Viernes inicio')),
-              const SizedBox(height: 40),
+              if (DatabaseService.isAdmin) ...[
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(child: SectionHeader(icon: Icons.mark_email_read_outlined, label: 'Correos autorizados')),
+                    IconButton(
+                      icon: Icon(Icons.add_circle, color: theme.colorScheme.primary),
+                      tooltip: 'Autorizar correo',
+                      onPressed: _addAuthorizedEmail,
+                    ),
+                  ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text('Correos fuera de @${DatabaseService.allowedDomain} habilitados para entrar con Google.', style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant)),
+                ),
+                if (_authorizedEmails.isEmpty)
+                  Card(child: ListTile(dense: true, leading: const Icon(Icons.info_outline, size: 18), title: Text('Sin correos externos autorizados', style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant)))),
+                ..._authorizedEmails.map((email) => Card(
+                  margin: const EdgeInsets.only(bottom: 6),
+                  child: ListTile(
+                    dense: true,
+                    leading: const CircleAvatar(radius: 16, child: Icon(Icons.alternate_email, size: 16)),
+                    title: Text(email, style: const TextStyle(fontSize: 13)),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline, size: 20),
+                      onPressed: () async {
+                        await DatabaseService.removeAuthorizedEmail(email);
+                        _load();
+                      },
+                    ),
+                  ),
+                )),
+              ],
+              // Configuracion del coro: solo el admin puede verla/editarla.
+              if (DatabaseService.isAdmin) ...[
+                const SizedBox(height: 16),
+                SectionHeader(icon: Icons.timer_outlined, label: 'Reglas de tardanza'),
+                const SizedBox(height: 12),
+                _SettingTile(theme: theme, icon: Icons.hourglass_bottom, label: 'Minutos de tolerancia', value: '${_settings['grace_period_minutes']} min', onTap: () => _edit('grace_period_minutes', 'Minutos de tolerancia')),
+                _SettingTile(theme: theme, icon: Icons.attach_money, label: 'Multa por minuto', value: 'S/ ${_settings['fine_per_minute']}', onTap: () => _edit('fine_per_minute', 'Multa por minuto (S/)')),
+                _SettingTile(theme: theme, icon: Icons.money_off, label: 'Multa por falta', value: 'S/ ${_settings['absence_fine'] ?? '4.00'}', onTap: () => _edit('absence_fine', 'Multa por falta (S/)', defaultValue: '4.00')),
+                const SizedBox(height: 28),
+                SectionHeader(icon: Icons.star_outline, label: 'Presentaciones'),
+                const SizedBox(height: 12),
+                _SettingTile(theme: theme, icon: Icons.exposure_plus_1, label: 'Valor en asistencias', value: '${_settings['presentation_weight']} asistencias', onTap: () => _edit('presentation_weight', 'Valor en asistencias')),
+                const SizedBox(height: 28),
+                SectionHeader(icon: Icons.schedule, label: 'Horarios de ensayo'),
+                const SizedBox(height: 12),
+                _SettingTile(theme: theme, icon: Icons.sunny, label: 'Lunes', value: '${_settings['schedule_monday_start']} - ${_settings['schedule_monday_end']}', onTap: () => _edit('schedule_monday_start', 'Lunes inicio')),
+                _SettingTile(theme: theme, icon: Icons.cloud, label: 'Miercoles', value: '${_settings['schedule_wednesday_start']} - ${_settings['schedule_wednesday_end']}', onTap: () => _edit('schedule_wednesday_start', 'Miercoles inicio')),
+                _SettingTile(theme: theme, icon: Icons.nights_stay, label: 'Viernes', value: '${_settings['schedule_friday_start']} - ${_settings['schedule_friday_end']}', onTap: () => _edit('schedule_friday_start', 'Viernes inicio')),
+                const SizedBox(height: 28),
+                const SectionHeader(icon: Icons.location_on_outlined, label: 'Ubicación de ensayos'),
+                const SizedBox(height: 4),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text(
+                    'Ubicación aplicada automáticamente a los ensayos que se generan solos, para que exijan estar presentes al marcar asistencia.',
+                    style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ),
+                StatefulBuilder(
+                  builder: (ctx, setLocationState) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      LocationPicker(
+                        title: 'Ubicación por defecto',
+                        selectedPosition: _defaultLocation,
+                        radiusMeters: _defaultRadius,
+                        onLocationSelected: (pos) => setLocationState(() => _defaultLocation = pos),
+                        onClear: () => setLocationState(() => _defaultLocation = null),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        Expanded(
+                          child: TextFormField(
+                            initialValue: _defaultRadius.toString(),
+                            decoration: const InputDecoration(labelText: 'Radio (metros)', prefixIcon: Icon(Icons.radar)),
+                            keyboardType: TextInputType.number,
+                            onChanged: (v) => setLocationState(() => _defaultRadius = int.tryParse(v) ?? _defaultRadius),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        FilledButton(
+                          onPressed: _defaultLocation == null ? null : () async { await _saveDefaultLocation(); setLocationState(() {}); },
+                          child: const Text('Guardar'),
+                        ),
+                      ]),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 32),
+              // Cerrar sesion (disponible para todos)
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.logout),
+                  label: const Text('Cerrar sesión'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: theme.colorScheme.error,
+                    side: BorderSide(color: theme.colorScheme.error.withValues(alpha: 0.4)),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  onPressed: () async {
+                    final confirm = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Cerrar sesión'),
+                        content: const Text('¿Seguro que quieres cerrar sesión?'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
+                          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Cerrar sesión')),
+                        ],
+                      ),
+                    );
+                    if (confirm != true) return;
+                    await DatabaseService.logout();
+                    if (!context.mounted) return;
+                    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
+                  },
+                ),
+              ),
+              const SizedBox(height: 32),
               Center(
                 child: Column(
                   children: [
@@ -140,22 +331,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
     );
-  }
-}
-
-class _SectionHeader extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  const _SectionHeader({required this.icon, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Row(children: [
-      Icon(icon, size: 18, color: theme.colorScheme.primary),
-      const SizedBox(width: 8),
-      Text(label, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: theme.colorScheme.primary)),
-    ]);
   }
 }
 

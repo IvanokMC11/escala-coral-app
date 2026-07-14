@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/database_service.dart';
+import '../widgets/common.dart';
 
 class MyAttendanceScreen extends StatefulWidget {
   const MyAttendanceScreen({super.key});
@@ -14,6 +15,8 @@ class _MyAttendanceScreenState extends State<MyAttendanceScreen> {
   List<Map<String, dynamic>> _fines = [];
   Map<String, dynamic> _stats = {};
   bool _loading = true;
+  bool _initialLoad = true;
+  String? _error;
   int? _memberId;
 
   @override
@@ -23,14 +26,23 @@ class _MyAttendanceScreenState extends State<MyAttendanceScreen> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(() { _loading = true; _error = null; });
     _memberId = DatabaseService.currentUser?['member_id'] as int?;
     if (_memberId != null) {
-      _attendance = await DatabaseService.getMyAttendance(_memberId!);
-      _fines = await DatabaseService.getMyFines(_memberId!);
-      _stats = await DatabaseService.getMyStats(_memberId!);
+      try {
+        final results = await Future.wait([
+          DatabaseService.getMyAttendance(_memberId!),
+          DatabaseService.getMyFines(_memberId!),
+          DatabaseService.getMyStats(_memberId!),
+        ]);
+        _attendance = results[0] as List<Map<String, dynamic>>;
+        _fines = results[1] as List<Map<String, dynamic>>;
+        _stats = results[2] as Map<String, dynamic>;
+      } catch (_) {
+        _error = 'Error al cargar tu asistencia';
+      }
     }
-    setState(() => _loading = false);
+    setState(() { _loading = false; _initialLoad = false; });
   }
 
   @override
@@ -47,15 +59,12 @@ class _MyAttendanceScreenState extends State<MyAttendanceScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Mi asistencia', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22))),
-      body: _loading
+      body: _loading && _initialLoad
         ? const Center(child: CircularProgressIndicator())
-        : _memberId == null
-          ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.person_off, size: 64, color: theme.colorScheme.onSurfaceVariant),
-              const SizedBox(height: 16),
-              Text('Sin perfil vinculado', style: theme.textTheme.titleMedium),
-              Text('Contacta al administrador', style: TextStyle(color: theme.colorScheme.onSurfaceVariant)),
-            ]))
+        : _error != null
+          ? ErrorRetry(message: _error!, onRetry: _load)
+          : _memberId == null
+          ? const EmptyState(icon: Icons.person_off, iconSize: 64, title: 'Sin perfil vinculado', subtitle: 'Contacta al administrador')
           : RefreshIndicator(
               onRefresh: _load,
               child: SingleChildScrollView(
@@ -73,20 +82,21 @@ class _MyAttendanceScreenState extends State<MyAttendanceScreen> {
                       ),
                       child: Column(children: [
                         Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-                          _StatCircle(theme: theme, label: 'Asistencia', value: '$pct%', color: total > 0 && attended / total >= 0.9 ? Colors.green : total > 0 && attended / total >= 0.7 ? Colors.orange : Colors.red),
-                          _StatCircle(theme: theme, label: 'Tardanzas', value: '$late', color: Colors.orange),
-                          _StatCircle(theme: theme, label: 'Faltas', value: '$absent', color: Colors.red),
+                          StatCircle(label: 'Asistencia', value: '$pct%', color: total > 0 && attended / total >= 0.9 ? Colors.green : total > 0 && attended / total >= 0.7 ? Colors.orange : Colors.red),
+                          StatCircle(label: 'Tardanzas', value: '$late', color: Colors.orange),
+                          StatCircle(label: 'Faltas', value: '$absent', color: Colors.red),
                         ]),
                         const SizedBox(height: 16),
                         Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-                          Text('Deuda: S/ ${debt.toStringAsFixed(2)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: debt > 0 ? theme.colorScheme.error : Colors.green)),
-                          Text('Pagado: S/ ${paid.toStringAsFixed(2)}', style: TextStyle(fontSize: 13, color: Colors.green)),
+                          Flexible(child: Text('Deuda: S/ ${debt.toStringAsFixed(2)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: debt > 0 ? theme.colorScheme.error : Colors.green), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          const SizedBox(width: 8),
+                          Flexible(child: Text('Pagado: S/ ${paid.toStringAsFixed(2)}', style: TextStyle(fontSize: 13, color: Colors.green), maxLines: 1, overflow: TextOverflow.ellipsis)),
                         ]),
                       ]),
                     ),
                     const SizedBox(height: 24),
                     if (_fines.isNotEmpty) ...[
-                      Row(children: [Icon(Icons.warning, size: 18, color: Colors.orange), const SizedBox(width: 8), Text('Multas', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold))]),
+                      const SectionHeader(icon: Icons.warning, label: 'Multas', primaryColor: false),
                       const SizedBox(height: 8),
                       ..._fines.map((f) => Card(
                         margin: const EdgeInsets.only(bottom: 6),
@@ -100,7 +110,7 @@ class _MyAttendanceScreenState extends State<MyAttendanceScreen> {
                       )),
                       const SizedBox(height: 16),
                     ],
-                    Row(children: [Icon(Icons.history, size: 18, color: theme.colorScheme.primary), const SizedBox(width: 8), Text('Historial de ensayos', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold))]),
+                    const SectionHeader(icon: Icons.history, label: 'Historial de ensayos'),
                     const SizedBox(height: 8),
                     if (_attendance.isEmpty)
                       Center(child: Padding(padding: const EdgeInsets.all(24), child: Text('Sin registro de asistencias', style: TextStyle(color: theme.colorScheme.onSurfaceVariant))))
@@ -132,26 +142,5 @@ class _MyAttendanceScreenState extends State<MyAttendanceScreen> {
               ),
             ),
     );
-  }
-}
-
-class _StatCircle extends StatelessWidget {
-  final ThemeData theme;
-  final String label;
-  final String value;
-  final Color color;
-  const _StatCircle({required this.theme, required this.label, required this.value, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(children: [
-      Container(
-        width: 56, height: 56,
-        decoration: BoxDecoration(shape: BoxShape.circle, color: color.withValues(alpha: 0.15)),
-        child: Center(child: Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: color))),
-      ),
-      const SizedBox(height: 4),
-      Text(label, style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant)),
-    ]);
   }
 }

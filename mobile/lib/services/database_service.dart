@@ -1,408 +1,408 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:crypto/crypto.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart' as ffi;
-import 'package:path/path.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+/// Resultado de un intento de inicio de sesion con Google.
+enum GoogleAuthStatus {
+  /// El usuario cerro el dialogo de Google sin elegir cuenta.
+  cancelled,
+  /// El correo no es @unsaac.edu.pe ni esta en la lista de autorizados.
+  unauthorized,
+  /// Ya existia un usuario con ese correo: sesion iniciada.
+  loggedIn,
+  /// Correo autorizado pero sin cuenta aun: falta vincular a un miembro.
+  needsLink,
+  /// Ocurrio un error inesperado.
+  error,
+}
+
+class GoogleAuthResult {
+  final GoogleAuthStatus status;
+  final String? email;
+  const GoogleAuthResult(this.status, {this.email});
+}
 
 class DatabaseService {
-  static Database? _db;
-  static bool _initialized = false;
+  static SupabaseClient get _supabase => Supabase.instance.client;
 
-  static Future<Database> get database async {
-    if (!_initialized) {
-      if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-        ffi.sqfliteFfiInit();
-        databaseFactory = ffi.databaseFactoryFfi;
-      }
-      _initialized = true;
-    }
-    _db ??= await _init();
-    return _db!;
-  }
+  // ─── Google Sign-In ───────────────────────────────────
+  /// Dominio institucional permitido para registrarse sin autorizacion previa.
+  static const String allowedDomain = 'unsaac.edu.pe';
 
-  static Future<Database> _init() async {
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'escala_coral.db');
-
-    return openDatabase(
-      path,
-      version: 8,
-      onCreate: (db, version) async {
-        await db.execute('''
-          CREATE TABLE members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT,
-            phone TEXT,
-            codigo TEXT,
-            escuela TEXT,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            beca_eligible INTEGER NOT NULL DEFAULT 1,
-            cuerda TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-          )
-        ''');
-
-        await db.execute('''
-          CREATE TABLE rehearsals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL UNIQUE,
-            start_time TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            description TEXT,
-            is_canceled INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-          )
-        ''');
-
-        await db.execute('''
-          CREATE TABLE attendance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            member_id INTEGER NOT NULL,
-            rehearsal_id INTEGER NOT NULL,
-            arrival_time TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('present','late','absent')),
-            late_minutes INTEGER NOT NULL DEFAULT 0,
-            fine_amount REAL NOT NULL DEFAULT 0,
-            collected INTEGER NOT NULL DEFAULT 0,
-            notes TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
-            FOREIGN KEY (rehearsal_id) REFERENCES rehearsals(id) ON DELETE CASCADE,
-            UNIQUE(member_id, rehearsal_id)
-          )
-        ''');
-
-        await db.execute('''
-          CREATE TABLE presentations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            time TEXT NOT NULL,
-            location TEXT,
-            repertoire TEXT,
-            is_closed INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-          )
-        ''');
-
-        await db.execute('''
-          CREATE TABLE presentation_attendance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            member_id INTEGER NOT NULL,
-            presentation_id INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'present' CHECK(status IN ('present','absent')),
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
-            FOREIGN KEY (presentation_id) REFERENCES presentations(id) ON DELETE CASCADE,
-            UNIQUE(member_id, presentation_id)
-          )
-        ''');
-
-        await db.execute('''
-          CREATE TABLE settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-          )
-        ''');
-
-        await db.execute('CREATE INDEX idx_attendance_member ON attendance(member_id)');
-        await db.execute('CREATE INDEX idx_attendance_rehearsal ON attendance(rehearsal_id)');
-        await db.execute('CREATE INDEX idx_pres_att_member ON presentation_attendance(member_id)');
-        await db.execute('CREATE INDEX idx_pres_att_pres ON presentation_attendance(presentation_id)');
-
-        await db.execute('''
-          CREATE TABLE IF NOT EXISTS member_fines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            member_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            reason TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            paid INTEGER NOT NULL DEFAULT 0,
-            paid_at TEXT,
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
-          )
-        ''');
-        await db.execute('''
-          CREATE TABLE IF NOT EXISTS treasury (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL CHECK(type IN ('income','expense')),
-            concept TEXT NOT NULL,
-            amount REAL NOT NULL,
-            description TEXT,
-            member_id INTEGER,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE SET NULL
-          )
-        ''');
-        await db.execute('''
-          CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            member_id INTEGER,
-            role TEXT NOT NULL DEFAULT 'miembro' CHECK(role IN ('admin','tesorero','director','miembro')),
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE SET NULL
-          )
-        ''');
-
-        await db.execute('CREATE INDEX IF NOT EXISTS idx_treasury_date ON treasury(created_at)');
-
-        // Crear admin por defecto
-        final adminHash = sha256.convert(utf8.encode('admin123')).toString();
-        await db.insert('users', {'email': 'admin', 'password_hash': adminHash, 'role': 'admin', 'member_id': 1});
-
-        await db.insert('settings', {'key': 'grace_period_minutes', 'value': '15'});
-        await db.insert('settings', {'key': 'fine_per_minute', 'value': '0.20'});
-        await db.insert('settings', {'key': 'fine_currency', 'value': 'S/'});
-        await db.insert('settings', {'key': 'schedule_monday_start', 'value': '18:00'});
-        await db.insert('settings', {'key': 'schedule_monday_end', 'value': '20:00'});
-        await db.insert('settings', {'key': 'schedule_wednesday_start', 'value': '18:00'});
-        await db.insert('settings', {'key': 'schedule_wednesday_end', 'value': '20:00'});
-        await db.insert('settings', {'key': 'schedule_friday_start', 'value': '18:00'});
-        await db.insert('settings', {'key': 'schedule_friday_end', 'value': '20:00'});
-        await db.insert('settings', {'key': 'presentation_weight', 'value': '5'});
-
-        final members = [
-          {'name': 'Jaide Liseth Ramirez Hurtado', 'codigo': '241528', 'escuela': 'Matematica', 'cuerda': 'SOPRANO'},
-          {'name': 'Astrid Araceli Ramos Puma', 'codigo': '231475', 'escuela': 'Matematica', 'cuerda': 'ALTO'},
-          {'name': 'Marianela Haquehua Felix', 'codigo': '241513', 'escuela': 'Matematica', 'cuerda': ''},
-          {'name': 'Kevin Paul Quispe Luque', 'codigo': '235235', 'escuela': 'Derecho', 'cuerda': 'ALTO'},
-          {'name': 'George Ivanok Munoz Castillo', 'codigo': '204800', 'escuela': 'Ing. Informatica y de sistemas', 'cuerda': 'TENOR'},
-          {'name': 'Leonardo Dario Mormontoy Quispe', 'codigo': '250913', 'escuela': 'Matematica', 'cuerda': 'TENOR'},
-          {'name': 'Ronaldo Huaman Tecse', 'codigo': '215945', 'escuela': 'Arquitectura', 'cuerda': 'BAJO'},
-          {'name': 'Tany Damnet Marron Pampa', 'codigo': '221633', 'escuela': 'Biologia', 'cuerda': 'TENOR'},
-          {'name': 'Claudia Verenize Flores Mollinedo', 'codigo': '220846', 'escuela': 'Educacion secundaria c. lengua y literatura', 'cuerda': 'ALTO'},
-          {'name': 'Carlos Eduardo Banda Cjuno', 'codigo': '250869', 'escuela': 'Ing. Geologica', 'cuerda': 'TENOR'},
-          {'name': 'Luciano Javier Alanoca Senca', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'TENOR'},
-          {'name': 'Josue Alejandro Flores Huicho', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'BAJO'},
-          {'name': 'Helen Silvana Ormachea Achaui', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'SOPRANO'},
-          {'name': 'Isabel Gabriela Percca Tupayachi', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'SOPRANO'},
-          {'name': 'Ivonne Alexandra Nathali Robles Panduro', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'SOPRANO'},
-          {'name': 'Josue Samuel Roque Quispe', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'TENOR'},
-          {'name': 'Varinia Villavicencio Yllapuma', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'ALTO'},
-          {'name': 'Miralbe Josdely Warthon Campana', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'SOPRANO'},
-          {'name': 'Paul Sandro Zuniga Huaman', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'BAJO'},
-          {'name': 'Leo Dan Chayna Castro', 'codigo': '', 'escuela': '', 'beca_eligible': 0, 'cuerda': 'TENOR'},
-        ];
-        final batch = db.batch();
-        for (final m in members) {
-          batch.insert('members', m);
-        }
-        await batch.commit(noResult: true);
-      },
-      onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await db.execute("ALTER TABLE rehearsals ADD COLUMN is_canceled INTEGER NOT NULL DEFAULT 0");
-          await db.execute('''
-            CREATE TABLE IF NOT EXISTS presentations (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              date TEXT NOT NULL, time TEXT NOT NULL,
-              location TEXT, repertoire TEXT,
-              is_closed INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-          ''');
-          await db.execute('''
-            CREATE TABLE IF NOT EXISTS presentation_attendance (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              member_id INTEGER NOT NULL, presentation_id INTEGER NOT NULL,
-              status TEXT NOT NULL DEFAULT 'present' CHECK(status IN ('present','absent')),
-              created_at TEXT NOT NULL DEFAULT (datetime('now')),
-              FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
-              FOREIGN KEY (presentation_id) REFERENCES presentations(id) ON DELETE CASCADE,
-              UNIQUE(member_id, presentation_id)
-            )
-          ''');
-          await db.execute('CREATE INDEX IF NOT EXISTS idx_pres_att_member ON presentation_attendance(member_id)');
-          await db.execute('CREATE INDEX IF NOT EXISTS idx_pres_att_pres ON presentation_attendance(presentation_id)');
-          await db.insert('settings', {'key': 'presentation_weight', 'value': '5'});
-        }
-        if (oldVersion < 3) {
-          await db.execute("ALTER TABLE members ADD COLUMN codigo TEXT");
-          await db.execute("ALTER TABLE members ADD COLUMN escuela TEXT");
-        }
-        if (oldVersion < 4) {
-          await db.execute("ALTER TABLE members ADD COLUMN beca_eligible INTEGER NOT NULL DEFAULT 1");
-        }
-        if (oldVersion < 5) {
-          await db.execute("ALTER TABLE members ADD COLUMN cuerda TEXT");
-        }
-        if (oldVersion < 8) {
-          await db.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              email TEXT NOT NULL UNIQUE,
-              password_hash TEXT NOT NULL,
-              member_id INTEGER,
-              role TEXT NOT NULL DEFAULT 'miembro' CHECK(role IN ('admin','tesorero','director','miembro')),
-              created_at TEXT NOT NULL DEFAULT (datetime('now')),
-              FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE SET NULL
-            )
-          ''');
-          final adminHash = sha256.convert(utf8.encode('admin123')).toString();
-          await db.insert('users', {'email': 'admin', 'password_hash': adminHash, 'role': 'admin', 'member_id': 1}, conflictAlgorithm: ConflictAlgorithm.ignore);
-        }
-        if (oldVersion < 7) {
-          await db.execute("ALTER TABLE attendance ADD COLUMN collected INTEGER NOT NULL DEFAULT 0");
-        }
-        if (oldVersion < 6) {
-          await db.execute('''
-            CREATE TABLE IF NOT EXISTS member_fines (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              member_id INTEGER NOT NULL,
-              amount REAL NOT NULL,
-              reason TEXT NOT NULL,
-              created_at TEXT NOT NULL DEFAULT (datetime('now')),
-              paid INTEGER NOT NULL DEFAULT 0,
-              paid_at TEXT,
-              FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
-            )
-          ''');
-          await db.execute('''
-            CREATE TABLE IF NOT EXISTS treasury (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              type TEXT NOT NULL CHECK(type IN ('income','expense')),
-              concept TEXT NOT NULL,
-              amount REAL NOT NULL,
-              description TEXT,
-              member_id INTEGER,
-              created_at TEXT NOT NULL DEFAULT (datetime('now')),
-              FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE SET NULL
-            )
-          ''');
-        }
-      },
-    );
-  }
+  static final GoogleSignIn _googleSignIn = GoogleSignIn(
+    // Client ID de tipo "Web" del proyecto en Google Cloud Console.
+    serverClientId:
+        '338526097367-b1shhrg6nd1gkire3e6q4gou4306nrvq.apps.googleusercontent.com',
+    scopes: const ['email'],
+  );
 
   // ─── Members ──────────────────────────────────────────
-  static Future<List<Map<String, dynamic>>> getMembers() async {
-    final db = await database;
-    return db.query('members', where: 'is_active = 1', orderBy: 'name');
+  // Cache en memoria de sesion: getMembers() se llama desde casi todas las
+  // pantallas y los datos casi nunca cambian entre navegaciones, asi que
+  // evitamos un round-trip de red repetido. Se invalida en cualquier
+  // escritura (add/update/delete) y en logout().
+  static List<Map<String, dynamic>>? _membersCache;
+
+  static Future<List<Map<String, dynamic>>> getMembers({bool forceRefresh = false}) async {
+    if (!forceRefresh && _membersCache != null) return _membersCache!;
+    final r = await _supabase.from('members').select().eq('is_active', 1).order('name');
+    _membersCache = List<Map<String, dynamic>>.from(r);
+    return _membersCache!;
   }
 
   static Future<int> addMember(String name, {String? email, String? phone, String? codigo, String? escuela, int becaEligible = 1, String? cuerda}) async {
-    final db = await database;
-    return db.insert('members', {'name': name, 'email': email, 'phone': phone, 'codigo': codigo, 'escuela': escuela, 'beca_eligible': becaEligible, 'cuerda': cuerda});
+    final r = await _supabase.from('members').insert({
+      'name': name, 'email': email, 'phone': phone, 'codigo': codigo,
+      'escuela': escuela, 'beca_eligible': becaEligible, 'cuerda': cuerda,
+    }).select();
+    _membersCache = null;
+    return (r.first as Map<String, dynamic>)['id'] as int;
   }
 
   static Future<void> updateMember(int id, Map<String, dynamic> data) async {
-    final db = await database;
-    await db.update('members', data, where: 'id = ?', whereArgs: [id]);
+    await _supabase.from('members').update(data).eq('id', id);
+    _membersCache = null;
   }
 
   static Future<void> deleteMember(int id) async {
-    final db = await database;
-    await db.delete('members', where: 'id = ?', whereArgs: [id]);
+    await _supabase.from('members').delete().eq('id', id);
+    _membersCache = null;
+  }
+
+  static Future<Map<String, dynamic>?> getMember(int id) async {
+    final r = await _supabase.from('members').select().eq('id', id);
+    return r.isNotEmpty ? r.first as Map<String, dynamic> : null;
+  }
+
+  /// Nombre del miembro vinculado al usuario con sesion iniciada (o null).
+  static Future<String?> currentMemberName() async {
+    final id = _currentUser?['member_id'] as int?;
+    if (id == null) return null;
+    final m = await getMember(id);
+    return m?['name'] as String?;
   }
 
   // ─── Rehearsals ───────────────────────────────────────
   static Future<List<Map<String, dynamic>>> getRehearsals({int? month, int? year}) async {
-    final db = await database;
-    String? where;
-    List? whereArgs;
+    var q = _supabase.from('rehearsals').select();
     if (month != null && year != null) {
-      where = "strftime('%m', date) = ? AND strftime('%Y', date) = ?";
-      whereArgs = [month.toString().padLeft(2, '0'), year.toString()];
+      final start = '$year-${month.toString().padLeft(2, '0')}-01';
+      final nextM = month == 12 ? 1 : month + 1;
+      final nextY = month == 12 ? year + 1 : year;
+      q = q.gte('date', start).lt('date', '$nextY-${nextM.toString().padLeft(2, '0')}-01');
     }
-    return db.query('rehearsals', where: where, whereArgs: whereArgs, orderBy: 'date ASC');
+    return q.order('date');
   }
 
-  static Future<int> createRehearsal(String date, String startTime, String endTime, {String? description}) async {
-    final db = await database;
-    return db.insert('rehearsals', {
-      'date': date, 'start_time': startTime, 'end_time': endTime, 'description': description,
-    });
+  static Future<int> createRehearsal(String date, String startTime, String endTime,
+      {String? description, double? latitude, double? longitude, int? geofenceRadius}) async {
+    final r = await _supabase.from('rehearsals').insert({
+      'date': date,
+      'start_time': startTime,
+      'end_time': endTime,
+      'description': description,
+      'latitude': latitude,
+      'longitude': longitude,
+      'geofence_radius': geofenceRadius ?? 30,
+    }).select();
+    return (r.first as Map<String, dynamic>)['id'] as int;
   }
 
   static Future<void> cancelRehearsal(int id, bool canceled) async {
-    final db = await database;
-    await db.update('rehearsals', {'is_canceled': canceled ? 1 : 0}, where: 'id = ?', whereArgs: [id]);
+    await _supabase.from('rehearsals').update({'is_canceled': canceled ? 1 : 0}).eq('id', id);
   }
 
   static Future<void> autoGenerateRehearsals() async {
-    final db = await database;
     final now = DateTime.now();
-    for (int i = 0; i < 60; i++) {
-      final date = now.add(Duration(days: i));
+    final today = DateTime(now.year, now.month, now.day);
+    final lastDay = today.add(const Duration(days: 59));
+
+    String fmt(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+    // Candidatas: todos los Lun/Mie/Vie del rango de 60 dias.
+    final candidates = <DateTime>[];
+    for (int i = 0; i <= 59; i++) {
+      final date = today.add(Duration(days: i));
       if (date.weekday == DateTime.monday || date.weekday == DateTime.wednesday || date.weekday == DateTime.friday) {
-        final dateStr = '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-        final existing = await db.query('rehearsals', where: 'date = ?', whereArgs: [dateStr]);
-        if (existing.isEmpty) {
-          final dayName = date.weekday == DateTime.monday ? 'Lunes' : date.weekday == DateTime.wednesday ? 'Miercoles' : 'Viernes';
-          await db.insert('rehearsals', {
-            'date': dateStr, 'start_time': '18:00', 'end_time': '20:00', 'description': 'Ensayo $dayName',
-          });
-        }
+        candidates.add(date);
       }
     }
+    if (candidates.isEmpty) return;
+
+    // Una sola consulta para saber que fechas ya existen en el rango.
+    final existingRows = await _supabase
+        .from('rehearsals')
+        .select('date')
+        .gte('date', fmt(today))
+        .lte('date', fmt(lastDay));
+    final existingDates = existingRows.map((r) => r['date'] as String).toSet();
+
+    // Si el coro configuro una ubicacion por defecto en Ajustes, todo
+    // ensayo autogenerado nace con geofence activo (antes nacian sin
+    // ubicacion y la validacion de GPS nunca se aplicaba en la practica).
+    final settings = await getSettings();
+    final defaultLat = double.tryParse(settings['default_rehearsal_lat'] ?? '');
+    final defaultLng = double.tryParse(settings['default_rehearsal_lng'] ?? '');
+    final defaultRadius = int.tryParse(settings['default_rehearsal_radius'] ?? '') ?? 30;
+
+    final toInsert = <Map<String, dynamic>>[];
+    for (final date in candidates) {
+      final dateStr = fmt(date);
+      if (existingDates.contains(dateStr)) continue;
+      final dayName = date.weekday == DateTime.monday ? 'Lunes' : date.weekday == DateTime.wednesday ? 'Miercoles' : 'Viernes';
+      toInsert.add({
+        'date': dateStr, 'start_time': '18:00', 'end_time': '20:00', 'description': 'Ensayo $dayName',
+        if (defaultLat != null && defaultLng != null) 'latitude': defaultLat,
+        if (defaultLat != null && defaultLng != null) 'longitude': defaultLng,
+        if (defaultLat != null && defaultLng != null) 'geofence_radius': defaultRadius,
+      });
+    }
+    if (toInsert.isEmpty) return;
+
+    try {
+      await _supabase.from('rehearsals').insert(toInsert);
+    } catch (_) {}
   }
 
   static Future<Map<String, dynamic>?> getRehearsal(int id) async {
-    final db = await database;
-    final results = await db.query('rehearsals', where: 'id = ?', whereArgs: [id]);
-    return results.isNotEmpty ? results.first : null;
+    final r = await _supabase.from('rehearsals').select().eq('id', id);
+    return r.isNotEmpty ? r.first as Map<String, dynamic> : null;
   }
 
   static Future<void> deleteRehearsal(int id) async {
-    final db = await database;
-    await db.delete('attendance', where: 'rehearsal_id = ?', whereArgs: [id]);
-    await db.delete('rehearsals', where: 'id = ?', whereArgs: [id]);
+    await _supabase.from('attendance').delete().eq('rehearsal_id', id);
+    await _supabase.from('rehearsals').delete().eq('id', id);
+  }
+
+  /// Fija, cambia o quita (con lat/lng/radius = null) la ubicacion GPS de
+  /// un ensayo puntual (por ejemplo uno autogenerado que nacio sin
+  /// ubicacion antes de que existiera la ubicacion por defecto).
+  static Future<void> updateRehearsalLocation(int id, double? lat, double? lng, int? radius) async {
+    await _supabase.from('rehearsals').update({
+      'latitude': lat, 'longitude': lng, 'geofence_radius': lat != null ? radius : null,
+    }).eq('id', id);
+  }
+
+  /// Aplica la ubicacion por defecto del coro a los ensayos ya creados
+  /// (incluyendo los autogenerados antes de configurar la ubicacion) que
+  /// todavia no tienen geofence, para que el arreglo tenga efecto de
+  /// inmediato y no solo en ensayos generados a futuro.
+  static Future<void> applyDefaultLocationToUpcomingRehearsals(double lat, double lng, int radius) async {
+    final today = DateTime.now();
+    final todayStr = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    await _supabase.from('rehearsals')
+        .update({'latitude': lat, 'longitude': lng, 'geofence_radius': radius})
+        .gte('date', todayStr)
+        .filter('latitude', 'is', null);
   }
 
   // ─── Attendance ───────────────────────────────────────
   static Future<List<Map<String, dynamic>>> getRehearsalAttendance(int rehearsalId) async {
-    final db = await database;
-    return db.rawQuery('''
-      SELECT a.*, m.name as member_name
-      FROM attendance a JOIN members m ON a.member_id = m.id
-      WHERE a.rehearsal_id = ? ORDER BY m.name
-    ''', [rehearsalId]);
+    final data = await _supabase.from('attendance').select('*, members!inner(name)').eq('rehearsal_id', rehearsalId).order('name', referencedTable: 'members');
+    return data.map((e) {
+      final m = e as Map<String, dynamic>;
+      m['member_name'] = (m.remove('members') as Map<String, dynamic>)['name'];
+      return m;
+    }).toList();
   }
 
-  static Future<Map<String, dynamic>> markAttendance(int memberId, int rehearsalId, String arrivalTime) async {
-    final db = await database;
+  static Future<Map<String, dynamic>> markAttendance(int memberId, int rehearsalId, String arrivalTime,
+      {double? userLat, double? userLng, String? justifiedEntryTime}) async {
     final settings = await getSettings();
     final grace = int.parse(settings['grace_period_minutes'] ?? '15');
     final fine = double.parse(settings['fine_per_minute'] ?? '0.20');
-    final rehearsal = await db.query('rehearsals', where: 'id = ?', whereArgs: [rehearsalId]);
-    if (rehearsal.isEmpty) throw Exception('Ensayo no encontrado');
-    final start = rehearsal.first['start_time'] as String;
-    final r = _calc(arrivalTime, start, grace, fine);
-    final id = await db.insert('attendance', {
-      'member_id': memberId, 'rehearsal_id': rehearsalId, 'arrival_time': arrivalTime,
-      'status': r['status'], 'late_minutes': r['lateMinutes'], 'fine_amount': r['fineAmount'],
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
-    return (await db.query('attendance', where: 'id = ?', whereArgs: [id])).first;
+    final rehearsal = await _supabase.from('rehearsals').select('start_time, latitude, longitude, geofence_radius').eq('id', rehearsalId).single();
+    final start = rehearsal['start_time'] as String;
+
+    // Validar geofence si el ensayo tiene coordenadas
+    if (rehearsal['latitude'] != null && rehearsal['longitude'] != null) {
+      if (userLat == null || userLng == null) {
+        return {'error': 'REQUIERE_UBICACION', 'message': 'Debes activar GPS para marcar asistencia'};
+      }
+      final rehearsalLat = (rehearsal['latitude'] as num).toDouble();
+      final rehearsalLng = (rehearsal['longitude'] as num).toDouble();
+      final radius = (rehearsal['geofence_radius'] as num?)?.toDouble() ?? 30.0;
+
+      final distance = Geolocator.distanceBetween(userLat, userLng, rehearsalLat, rehearsalLng);
+      if (distance > radius) {
+        return {
+          'error': 'FUERA_RANGO',
+          'message': 'Estás a ${distance.toStringAsFixed(0)}m del ensayo (máx. ${radius.toInt()}m)',
+          'distance': distance,
+        };
+      }
+    }
+
+    // Calcular tardanza usando hora justificada si existe
+    final effectiveStart = justifiedEntryTime ?? start;
+    final r = _calc(arrivalTime, effectiveStart, grace, fine);
+    final result = await _supabase.from('attendance').upsert({
+      'member_id': memberId,
+      'rehearsal_id': rehearsalId,
+      'arrival_time': arrivalTime,
+      'status': r['status'],
+      'late_minutes': r['lateMinutes'],
+      'fine_amount': r['fineAmount'],
+      'justified_entry_time': justifiedEntryTime,
+    }).select();
+    return result.first as Map<String, dynamic>;
   }
 
   static Future<void> markFJ(int memberId, int rehearsalId) async {
-    final db = await database;
-    await db.insert('attendance', {
+    await _supabase.from('attendance').upsert({
       'member_id': memberId, 'rehearsal_id': rehearsalId, 'arrival_time': 'FJ',
       'status': 'present', 'late_minutes': 0, 'fine_amount': 0, 'notes': 'Falta justificada',
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    });
+  }
+
+  /// Marca falta (no justificada) y cobra la multa configurada en Ajustes
+  /// (S/4 por defecto) como una multa manual, para que aparezca en Deudas
+  /// de miembros y se pueda cobrar igual que cualquier otra multa. Solo
+  /// cobra una vez: si el miembro ya estaba marcado como ausente en este
+  /// ensayo, no vuelve a insertar la multa.
+  static Future<void> markAbsent(int memberId, int rehearsalId) async {
+    final existing = await _supabase.from('attendance').select('status').eq('member_id', memberId).eq('rehearsal_id', rehearsalId);
+    final alreadyAbsent = existing.isNotEmpty && existing.first['status'] == 'absent';
+
+    await _supabase.from('attendance').upsert({
+      'member_id': memberId, 'rehearsal_id': rehearsalId, 'arrival_time': 'AUSENTE',
+      'status': 'absent', 'late_minutes': 0, 'fine_amount': 0, 'notes': 'Falta',
+    });
+
+    if (!alreadyAbsent) {
+      final fine = await _absenceFine();
+      if (fine > 0) {
+        await _supabase.from('member_fines').insert({'member_id': memberId, 'amount': fine, 'reason': 'Falta de asistencia'});
+      }
+    }
+  }
+
+  /// Version en lote de [markAbsent], para "marcar todos ausentes".
+  static Future<void> markAbsentBatch(List<int> memberIds, int rehearsalId) async {
+    if (memberIds.isEmpty) return;
+    final existing = await _supabase.from('attendance').select('member_id, status').eq('rehearsal_id', rehearsalId).inFilter('member_id', memberIds);
+    final alreadyAbsentIds = existing.where((e) => e['status'] == 'absent').map((e) => e['member_id'] as int).toSet();
+
+    final rows = memberIds.map((id) => {
+      'member_id': id, 'rehearsal_id': rehearsalId, 'arrival_time': 'AUSENTE',
+      'status': 'absent', 'late_minutes': 0, 'fine_amount': 0, 'notes': 'Falta',
+    }).toList();
+    await _supabase.from('attendance').upsert(rows);
+
+    final toFine = memberIds.where((id) => !alreadyAbsentIds.contains(id)).toList();
+    if (toFine.isNotEmpty) {
+      final fine = await _absenceFine();
+      if (fine > 0) {
+        final fineRows = toFine.map((id) => {'member_id': id, 'amount': fine, 'reason': 'Falta de asistencia'}).toList();
+        await _supabase.from('member_fines').insert(fineRows);
+      }
+    }
+  }
+
+  static Future<double> _absenceFine() async {
+    final settings = await getSettings();
+    return double.tryParse(settings['absence_fine'] ?? '4.00') ?? 4.00;
+  }
+
+  /// Actualiza asistencia existente (solo staff/admin)
+  static Future<Map<String, dynamic>> updateAttendance(int attendanceId, {
+    String? arrivalTime,
+    String? status,
+    int? lateMinutes,
+    double? fineAmount,
+    String? notes,
+    String? justifiedEntryTime,
+  }) async {
+    final updateData = <String, dynamic>{};
+    if (arrivalTime != null) updateData['arrival_time'] = arrivalTime;
+    if (status != null) updateData['status'] = status;
+    if (lateMinutes != null) updateData['late_minutes'] = lateMinutes;
+    if (fineAmount != null) updateData['fine_amount'] = fineAmount;
+    if (notes != null) updateData['notes'] = notes;
+    if (justifiedEntryTime != null) updateData['justified_entry_time'] = justifiedEntryTime;
+    if (updateData.isEmpty) throw ArgumentError('Nada que actualizar');
+
+    final result = await _supabase.from('attendance').update(updateData).eq('id', attendanceId).select();
+    return result.first as Map<String, dynamic>;
+  }
+
+  /// Elimina asistencia (solo staff/admin)
+  static Future<void> deleteAttendance(int attendanceId) async {
+    await _supabase.from('attendance').delete().eq('id', attendanceId);
   }
 
   static Future<void> markBatch(int rehearsalId, List<Map<String, dynamic>> records) async {
-    final db = await database;
+    if (records.isEmpty) return;
     final settings = await getSettings();
     final grace = int.parse(settings['grace_period_minutes'] ?? '15');
     final fine = double.parse(settings['fine_per_minute'] ?? '0.20');
-    final rehearsal = await db.query('rehearsals', where: 'id = ?', whereArgs: [rehearsalId]);
-    if (rehearsal.isEmpty) throw Exception('Ensayo no encontrado');
-    final start = rehearsal.first['start_time'] as String;
-    final batch = db.batch();
-    for (final r in records) {
-      final res = _calc(r['arrival_time'], start, grace, fine);
-      batch.insert('attendance', {
-        'member_id': r['member_id'], 'rehearsal_id': rehearsalId, 'arrival_time': r['arrival_time'],
+    final rehearsal = await _supabase.from('rehearsals').select('start_time').eq('id', rehearsalId).single();
+    final start = rehearsal['start_time'] as String;
+    final rows = records.map((record) {
+      final justifiedEntry = record['justified_entry_time'] as String?;
+      final effectiveStart = justifiedEntry ?? start;
+      final res = _calc(record['arrival_time'], effectiveStart, grace, fine);
+      return {
+        'member_id': record['member_id'], 'rehearsal_id': rehearsalId,
+        'arrival_time': record['arrival_time'],
         'status': res['status'], 'late_minutes': res['lateMinutes'], 'fine_amount': res['fineAmount'],
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+        'justified_entry_time': justifiedEntry,
+      };
+    }).toList();
+    await _supabase.from('attendance').upsert(rows);
+  }
+
+  /// Marca varios miembros como presentes/tarde a la vez con una sola
+  /// llamada de red (usado por "marcar todos presentes"). Valida geofence
+  /// una sola vez con la posicion GPS ya obtenida, no una vez por miembro.
+  static Future<Map<String, dynamic>> markAttendanceBatch(
+    List<int> memberIds, int rehearsalId, String arrivalTime,
+    {double? userLat, double? userLng}) async {
+    if (memberIds.isEmpty) return {'ok': true};
+    final settings = await getSettings();
+    final grace = int.parse(settings['grace_period_minutes'] ?? '15');
+    final fine = double.parse(settings['fine_per_minute'] ?? '0.20');
+    final rehearsal = await _supabase.from('rehearsals').select('start_time, latitude, longitude, geofence_radius').eq('id', rehearsalId).single();
+    final start = rehearsal['start_time'] as String;
+
+    if (rehearsal['latitude'] != null && rehearsal['longitude'] != null) {
+      if (userLat == null || userLng == null) {
+        return {'error': 'REQUIERE_UBICACION', 'message': 'Debes activar GPS para marcar asistencia'};
+      }
+      final rehearsalLat = (rehearsal['latitude'] as num).toDouble();
+      final rehearsalLng = (rehearsal['longitude'] as num).toDouble();
+      final radius = (rehearsal['geofence_radius'] as num?)?.toDouble() ?? 30.0;
+      final distance = Geolocator.distanceBetween(userLat, userLng, rehearsalLat, rehearsalLng);
+      if (distance > radius) {
+        return {
+          'error': 'FUERA_RANGO',
+          'message': 'Estás a ${distance.toStringAsFixed(0)}m del ensayo (máx. ${radius.toInt()}m)',
+          'distance': distance,
+        };
+      }
     }
-    await batch.commit(noResult: true);
+
+    final r = _calc(arrivalTime, start, grace, fine);
+    final rows = memberIds.map((id) => {
+      'member_id': id, 'rehearsal_id': rehearsalId, 'arrival_time': arrivalTime,
+      'status': r['status'], 'late_minutes': r['lateMinutes'], 'fine_amount': r['fineAmount'],
+    }).toList();
+    await _supabase.from('attendance').upsert(rows);
+    return {'ok': true};
+  }
+
+  /// Marca varios miembros como falta justificada (FJ) con una sola llamada.
+  static Future<void> markFJBatch(List<int> memberIds, int rehearsalId) async {
+    if (memberIds.isEmpty) return;
+    final rows = memberIds.map((id) => {
+      'member_id': id, 'rehearsal_id': rehearsalId, 'arrival_time': 'FJ',
+      'status': 'present', 'late_minutes': 0, 'fine_amount': 0, 'notes': 'Falta justificada',
+    }).toList();
+    await _supabase.from('attendance').upsert(rows);
   }
 
   static Map<String, dynamic> _calc(String arrival, String start, int grace, double finePerMin) {
@@ -417,264 +417,170 @@ class DatabaseService {
 
   // ─── Member Monthly Stats ─────────────────────────────
   static Future<List<Map<String, dynamic>>> getMemberMonthlyStats(int year, int month) async {
-    final db = await database;
-    final m = month.toString().padLeft(2, '0');
-    return db.rawQuery('''
-      SELECT
-        m.id, m.name, m.codigo, m.escuela,
-        COUNT(r.id) as total_rehearsals,
-        COALESCE(SUM(CASE WHEN a.status = 'present' OR a.status = 'late' THEN 1 ELSE 0 END), 0) as attended,
-        COALESCE(SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END), 0) as late_count,
-        COALESCE(SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END), 0) as absent_count,
-        COALESCE(SUM(a.late_minutes), 0) as total_late_minutes,
-        COALESCE(SUM(a.fine_amount), 0) as total_fine
-      FROM members m
-      CROSS JOIN (SELECT id FROM rehearsals WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ? AND is_canceled = 0) r
-      LEFT JOIN attendance a ON a.member_id = m.id AND a.rehearsal_id = r.id
-      WHERE m.is_active = 1
-      GROUP BY m.id, m.name, m.codigo, m.escuela
-      ORDER BY m.name
-    ''', [m, '$year']);
+    final r = await _supabase.rpc('get_member_monthly_stats', params: {'p_year': year, 'p_month': month});
+    return (r as List).cast<Map<String, dynamic>>();
   }
 
   // ─── Attendance Matrix ─────────────────────────────────
   static Future<Map<String, dynamic>> getAttendanceMatrix(int year, int month) async {
-    final db = await database;
-    final m = month.toString().padLeft(2, '0');
-    final rehearsals = await db.rawQuery('''
-      SELECT id, date, start_time, end_time
-      FROM rehearsals
-      WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ? AND is_canceled = 0
-      ORDER BY date ASC
-    ''', [m, '$year']);
-    final members = await db.query('members', where: 'is_active = 1', orderBy: 'name ASC');
-    final rehearsalIds = rehearsals.map((r) => r['id'] as int).toList();
-    List<Map<String, dynamic>> attendance = [];
-    if (rehearsalIds.isNotEmpty) {
-      final placeholders = rehearsalIds.map((_) => '?').join(',');
-      attendance = await db.rawQuery('''
-        SELECT a.member_id, a.rehearsal_id, a.status, a.arrival_time, a.late_minutes, a.fine_amount
-        FROM attendance a
-        WHERE a.rehearsal_id IN ($placeholders)
-      ''', rehearsalIds);
-    }
+    final r = await _supabase.rpc('get_attendance_matrix', params: {'p_year': year, 'p_month': month});
+    final data = r as Map<String, dynamic>;
     final attMap = <String, Map<String, dynamic>>{};
-    for (final a in attendance) {
-      attMap['${a['member_id']}_${a['rehearsal_id']}'] = a;
+    for (final a in (data['attendance'] as List)) {
+      final entry = a as Map<String, dynamic>;
+      attMap['${entry['member_id']}_${entry['rehearsal_id']}'] = entry;
     }
-    return {'rehearsals': rehearsals, 'members': members, 'attendance': attMap};
+    return {
+      'rehearsals': (data['rehearsals'] as List).cast<Map<String, dynamic>>(),
+      'members': (data['members'] as List).cast<Map<String, dynamic>>(),
+      'attendance': attMap,
+    };
   }
 
   // ─── Presentations ────────────────────────────────────
   static Future<List<Map<String, dynamic>>> getPresentations({int? month, int? year}) async {
-    final db = await database;
-    String? where;
-    List? whereArgs;
+    var q = _supabase.from('presentations').select();
     if (month != null && year != null) {
-      where = "strftime('%m', date) = ? AND strftime('%Y', date) = ?";
-      whereArgs = [month.toString().padLeft(2, '0'), year.toString()];
+      final start = '$year-${month.toString().padLeft(2, '0')}-01';
+      final nextM = month == 12 ? 1 : month + 1;
+      final nextY = month == 12 ? year + 1 : year;
+      q = q.gte('date', start).lt('date', '$nextY-${nextM.toString().padLeft(2, '0')}-01');
     }
-    return db.query('presentations', where: where, whereArgs: whereArgs, orderBy: 'date DESC');
+    return q.order('date', ascending: false);
   }
 
   static Future<int> createPresentation(String date, String time, {String? location, String? repertoire}) async {
-    final db = await database;
-    return db.insert('presentations', {
+    final r = await _supabase.from('presentations').insert({
       'date': date, 'time': time, 'location': location, 'repertoire': repertoire,
-    });
+    }).select();
+    return (r.first as Map<String, dynamic>)['id'] as int;
   }
 
   static Future<List<Map<String, dynamic>>> getPresentationAttendance(int presentationId) async {
-    final db = await database;
-    return db.rawQuery('''
-      SELECT pa.*, m.name as member_name
-      FROM presentation_attendance pa JOIN members m ON pa.member_id = m.id
-      WHERE pa.presentation_id = ? ORDER BY m.name
-    ''', [presentationId]);
+    final data = await _supabase.from('presentation_attendance').select('*, members!inner(name)').eq('presentation_id', presentationId).order('name', referencedTable: 'members');
+    return data.map((e) {
+      final m = e as Map<String, dynamic>;
+      m['member_name'] = (m.remove('members') as Map<String, dynamic>)['name'];
+      return m;
+    }).toList();
   }
 
   static Future<void> markPresentationAttendance(int memberId, int presentationId, String status) async {
-    final db = await database;
-    await db.insert('presentation_attendance', {
+    await _supabase.from('presentation_attendance').upsert({
       'member_id': memberId, 'presentation_id': presentationId, 'status': status,
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    });
+  }
+
+  /// Guarda el estado de asistencia de varios miembros con una sola llamada.
+  static Future<void> markPresentationAttendanceBatch(int presentationId, Map<int, String> statusByMemberId) async {
+    if (statusByMemberId.isEmpty) return;
+    final rows = statusByMemberId.entries.map((e) => {
+      'member_id': e.key, 'presentation_id': presentationId, 'status': e.value,
+    }).toList();
+    await _supabase.from('presentation_attendance').upsert(rows);
   }
 
   static Future<void> markAllPresentationAttendance(int presentationId, String status) async {
-    final db = await database;
-    final members = await db.query('members', where: 'is_active = 1');
-    final batch = db.batch();
-    for (final m in members) {
-      batch.insert('presentation_attendance', {
-        'member_id': m['id'], 'presentation_id': presentationId, 'status': status,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
-    }
-    await batch.commit(noResult: true);
+    final members = await _supabase.from('members').select('id').eq('is_active', 1);
+    if (members.isEmpty) return;
+    final rows = members.map((m) => {
+      'member_id': m['id'], 'presentation_id': presentationId, 'status': status,
+    }).toList();
+    await _supabase.from('presentation_attendance').upsert(rows);
   }
 
   static Future<void> autoClosePresentations() async {
-    final db = await database;
     final today = '${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}';
-    await db.update('presentations', {'is_closed': 1},
-      where: "date < ? AND is_closed = 0", whereArgs: [today]);
+    await _supabase.from('presentations').update({'is_closed': 1}).lt('date', today).eq('is_closed', 0);
   }
 
   static Future<void> closePresentation(int id) async {
-    final db = await database;
-    await db.update('presentations', {'is_closed': 1}, where: 'id = ?', whereArgs: [id]);
+    await _supabase.from('presentations').update({'is_closed': 1}).eq('id', id);
   }
 
   static Future<Map<String, dynamic>?> getPresentation(int id) async {
-    final db = await database;
-    final results = await db.query('presentations', where: 'id = ?', whereArgs: [id]);
-    return results.isNotEmpty ? results.first : null;
+    final r = await _supabase.from('presentations').select().eq('id', id);
+    return r.isNotEmpty ? r.first as Map<String, dynamic> : null;
+  }
+
+  static Future<List<Map<String, dynamic>>> getFutureEvents() async {
+    final today = DateTime.now().toIso8601String().split('T')[0];
+    final presentations = await _supabase
+        .from('presentations')
+        .select()
+        .gte('date', today)
+        .order('date');
+    final rehearsals = await _supabase
+        .from('rehearsals')
+        .select()
+        .gte('date', today)
+        .order('date');
+    return [...presentations, ...rehearsals];
+  }
+
+  static Future<void> updateFcmToken(int userId, String token) async {
+    await _supabase.from('users').update({'fcm_token': token}).eq('id', userId);
+  }
+
+  static int? getCurrentUserId() {
+    return _currentUser?['id'] as int?;
   }
 
   // ─── Reports ──────────────────────────────────────────
   static Future<List<Map<String, dynamic>>> getTop10(int year, int month) async {
-    final db = await database;
-    final m = month.toString().padLeft(2, '0');
-    final weight = int.parse((await getSettings())['presentation_weight'] ?? '5');
-    return db.rawQuery('''
-      SELECT
-        member_id, member_name, codigo, escuela,
-        SUM(total) as total_events,
-        SUM(present) as present_count,
-        SUM(late) as late_count,
-        SUM(absent) as absent_count,
-        SUM(late_min) as total_late_minutes,
-        SUM(fine) as total_fine,
-        ROUND(CAST(SUM(present + late) AS REAL) / SUM(total) * 100, 1) as attendance_percentage
-      FROM (
-        SELECT
-          m.id as member_id, m.name as member_name, m.codigo, m.escuela,
-          COUNT(r.id) as total,
-          SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) as present,
-          SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) as late,
-          SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as absent,
-          COALESCE(SUM(a.late_minutes), 0) as late_min,
-          COALESCE(SUM(a.fine_amount), 0) as fine
-        FROM members m
-        CROSS JOIN (SELECT id FROM rehearsals WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ? AND is_canceled = 0) r
-        LEFT JOIN attendance a ON a.member_id = m.id AND a.rehearsal_id = r.id
-        WHERE m.is_active = 1
-        GROUP BY m.id, m.name, m.codigo, m.escuela
-        UNION ALL
-        SELECT
-          m.id as member_id, m.name as member_name, m.codigo, m.escuela,
-          COUNT(p.id) * $weight as total,
-          SUM(CASE WHEN pa.status = 'present' THEN $weight ELSE 0 END) as present,
-          0 as late, 0 as absent, 0 as late_min, 0 as fine
-        FROM members m
-        CROSS JOIN (SELECT id FROM presentations WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ?) p
-        LEFT JOIN presentation_attendance pa ON pa.member_id = m.id AND pa.presentation_id = p.id
-        WHERE m.is_active = 1
-        GROUP BY m.id, m.name, m.codigo, m.escuela
-      )
-      GROUP BY member_id, member_name
-      HAVING total_events > 0
-      ORDER BY attendance_percentage DESC, total_late_minutes ASC
-      LIMIT 10
-    ''', [m, '$year', m, '$year']);
+    final r = await _supabase.rpc('get_top10', params: {'p_year': year, 'p_month': month});
+    return (r as List).cast<Map<String, dynamic>>();
   }
 
   // ─── Treasury & Fines ──────────────────────────────────
   static Future<List<Map<String, dynamic>>> getTreasury({int? month, int? year}) async {
-    final db = await database;
+    var q = _supabase.from('treasury').select();
     if (month != null && year != null) {
-      final m = month.toString().padLeft(2, '0');
-      return db.rawQuery('''
-        SELECT * FROM treasury
-        WHERE strftime('%m', created_at) = ? AND strftime('%Y', created_at) = ?
-        ORDER BY created_at DESC
-      ''', [m, '$year']);
+      final start = '$year-${month.toString().padLeft(2, '0')}-01';
+      final nextM = month == 12 ? 1 : month + 1;
+      final nextY = month == 12 ? year + 1 : year;
+      q = q.gte('created_at', start).lt('created_at', '$nextY-${nextM.toString().padLeft(2, '0')}-01');
     }
-    return db.query('treasury', orderBy: 'created_at DESC');
+    return q.order('created_at', ascending: false);
   }
 
   static Future<Map<String, double>> getTreasurySummary({int? month, int? year}) async {
-    final db = await database;
-    String where = ''; List? args;
-    if (month != null && year != null) {
-      final m = month.toString().padLeft(2, '0');
-      where = "WHERE strftime('%m', created_at) = ? AND strftime('%Y', created_at) = ?";
-      args = [m, '$year'];
-    }
-    final result = await db.rawQuery('''
-      SELECT
-        COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as total_income,
-        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as total_expense
-      FROM treasury $where
-    ''', args ?? []);
-    if (result.isEmpty) return {'total_income': 0, 'total_expense': 0, 'balance': 0};
-    final income = (result.first['total_income'] as num).toDouble();
-    final expense = (result.first['total_expense'] as num).toDouble();
-    return {'total_income': income, 'total_expense': expense, 'balance': income - expense};
+    final r = await _supabase.rpc('get_treasury_summary', params: {'p_year': year, 'p_month': month});
+    final m = r as Map<String, dynamic>;
+    return {
+      'total_income': (m['total_income'] as num).toDouble(),
+      'total_expense': (m['total_expense'] as num).toDouble(),
+      'balance': (m['balance'] as num).toDouble(),
+    };
   }
 
   static Future<int> addTreasuryEntry(String type, String concept, double amount, {String? description, int? memberId}) async {
-    final db = await database;
-    return db.insert('treasury', {
+    final r = await _supabase.from('treasury').insert({
       'type': type, 'concept': concept, 'amount': amount,
       'description': description, 'member_id': memberId,
-    });
+    }).select();
+    return (r.first as Map<String, dynamic>)['id'] as int;
   }
 
   static Future<List<Map<String, dynamic>>> getMemberDebts() async {
-    final db = await database;
-    final lateFees = await db.rawQuery('''
-      SELECT m.id, m.name, COALESCE(SUM(a.fine_amount), 0) as late_fee_debt
-      FROM members m
-      LEFT JOIN attendance a ON a.member_id = m.id AND a.status = 'late' AND a.collected = 0
-      WHERE m.is_active = 1
-      GROUP BY m.id
-    ''');
-    final manualFines = await db.rawQuery('''
-      SELECT member_id, COALESCE(SUM(amount), 0) as manual_fine_debt
-      FROM member_fines WHERE paid = 0
-      GROUP BY member_id
-    ''');
-    final manualMap = {for (final f in manualFines) f['member_id'] as int: (f['manual_fine_debt'] as num).toDouble()};
-    return lateFees.map((m) {
-      final id = m['id'] as int;
-      final late = (m['late_fee_debt'] as num).toDouble();
-      final manual = manualMap[id] ?? 0.0;
-      return {
-        'id': id,
-        'name': m['name'],
-        'late_fee_debt': late,
-        'manual_fine_debt': manual,
-        'total_debt': late + manual,
-      };
-    }).toList();
+    final r = await _supabase.rpc('get_member_debts');
+    return (r as List).cast<Map<String, dynamic>>();
   }
 
   static Future<void> addMemberFine(int memberId, double amount, String reason) async {
-    final db = await database;
-    await db.insert('member_fines', {'member_id': memberId, 'amount': amount, 'reason': reason});
+    await _supabase.from('member_fines').insert({
+      'member_id': memberId, 'amount': amount, 'reason': reason,
+    });
   }
 
   static Future<void> collectMemberDebt(int memberId, double amount, String concept) async {
-    final db = await database;
-    await db.transaction((txn) async {
-      await txn.insert('treasury', {
-        'type': 'income', 'concept': concept, 'amount': amount,
-        'description': 'Cobro a miembro', 'member_id': memberId,
-      });
-      await txn.execute('''
-        UPDATE attendance SET collected = 1
-        WHERE member_id = ? AND status = 'late' AND collected = 0
-      ''', [memberId]);
-      await txn.execute('''
-        UPDATE member_fines SET paid = 1, paid_at = datetime('now')
-        WHERE member_id = ? AND paid = 0
-      ''', [memberId]);
+    await _supabase.rpc('collect_member_debt', params: {
+      'p_member_id': memberId, 'p_amount': amount, 'p_concept': concept,
     });
   }
 
   static Future<List<Map<String, dynamic>>> getMemberFines(int memberId) async {
-    final db = await database;
-    return db.query('member_fines', where: 'member_id = ?', whereArgs: [memberId], orderBy: 'created_at DESC');
+    return _supabase.from('member_fines').select().eq('member_id', memberId).order('created_at', ascending: false);
   }
 
   // ─── Auth ──────────────────────────────────────────────
@@ -684,125 +590,245 @@ class DatabaseService {
   static bool get isStaff => _currentUser != null && ['admin', 'tesorero', 'director'].contains(_currentUser!['role']);
   static bool get isAdmin => _currentUser != null && _currentUser!['role'] == 'admin';
 
-  static Future<Map<String, dynamic>?> register(String email, String password, {int? memberId, String role = 'miembro'}) async {
-    final db = await database;
-    final hash = sha256.convert(utf8.encode(password)).toString();
+  static String _hash(String s) {
+    return sha256.convert(utf8.encode(s)).toString();
+  }
+
+  /// Inicia sesion con Google. Solo permite correos @unsaac.edu.pe o los
+  /// que el admin haya autorizado. Si el correo es valido pero aun no tiene
+  /// cuenta, devuelve [GoogleAuthStatus.needsLink] para vincularlo a un miembro.
+  static Future<GoogleAuthResult> signInWithGoogle() async {
     try {
-      final id = await db.insert('users', {'email': email, 'password_hash': hash, 'member_id': memberId, 'role': role, 'session_token': 'active'});
-      _currentUser = (await db.query('users', where: 'id = ?', whereArgs: [id])).first;
+      final account = await _googleSignIn.signIn();
+      if (account == null) {
+        return const GoogleAuthResult(GoogleAuthStatus.cancelled);
+      }
+      final email = account.email.trim().toLowerCase();
+
+      final authorized =
+          email.endsWith('@$allowedDomain') || await _isAuthorizedEmail(email);
+      if (!authorized) {
+        await _googleSignIn.signOut();
+        return GoogleAuthResult(GoogleAuthStatus.unauthorized, email: email);
+      }
+
+      final users = await _supabase.from('users').select().eq('email', email);
+      if (users.isNotEmpty) {
+        _currentUser = users.first as Map<String, dynamic>;
+        await _persistSession();
+        await _saveFcmToken();
+        return GoogleAuthResult(GoogleAuthStatus.loggedIn, email: email);
+      }
+      return GoogleAuthResult(GoogleAuthStatus.needsLink, email: email);
+    } catch (e) {
+      _lastError = e.toString();
+      return const GoogleAuthResult(GoogleAuthStatus.error);
+    }
+  }
+
+  /// Crea la cuenta de un usuario que entro por Google y la vincula a un
+  /// miembro. No usa contraseña (se guarda un marcador que nunca coincide
+  /// con un hash real de login por contraseña).
+  static Future<Map<String, dynamic>?> registerGoogleUser(
+      String email, int memberId,
+      {String role = 'miembro'}) async {
+    try {
+      final r = await _supabase.from('users').insert({
+        'email': email.trim().toLowerCase(),
+        'password_hash': 'GOOGLE_OAUTH',
+        'member_id': memberId,
+        'role': role,
+        'session_token': 'active',
+      }).select().single();
+      _currentUser = r as Map<String, dynamic>;
+      await _persistSession();
+      await _saveFcmToken();
       return _currentUser;
     } catch (e) {
+      _lastError = e.toString();
       return null;
     }
   }
 
+  /// Lista de correos autorizados por el admin (fuera del dominio institucional),
+  /// guardada en settings como texto separado por comas.
+  static Future<List<String>> getAuthorizedEmails() async {
+    final settings = await getSettings();
+    return (settings['authorized_emails'] ?? '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
+
+  static Future<bool> _isAuthorizedEmail(String email) async {
+    final list = await getAuthorizedEmails();
+    return list.contains(email);
+  }
+
+  /// URL de la foto de perfil de la cuenta de Google (o null si el usuario
+  /// no entro con Google o no tiene foto). Usa la sesion de Google ya
+  /// existente en el dispositivo, sin volver a pedir login.
+  static Future<String?> googlePhotoUrl() async {
+    try {
+      final acct = _googleSignIn.currentUser ?? await _googleSignIn.signInSilently();
+      return acct?.photoUrl;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> addAuthorizedEmail(String email) async {
+    final list = await getAuthorizedEmails();
+    final normalized = email.trim().toLowerCase();
+    if (normalized.isEmpty || list.contains(normalized)) return;
+    list.add(normalized);
+    await updateSetting('authorized_emails', list.join(','));
+  }
+
+  static Future<void> removeAuthorizedEmail(String email) async {
+    final list = await getAuthorizedEmails();
+    list.remove(email.trim().toLowerCase());
+    await updateSetting('authorized_emails', list.join(','));
+  }
+
+  static String? _lastError;
+  static String? get lastError => _lastError;
+
   static Future<Map<String, dynamic>?> login(String email, String password) async {
-    final db = await database;
-    final hash = sha256.convert(utf8.encode(password)).toString();
-    final users = await db.query('users', where: 'email = ? AND password_hash = ?', whereArgs: [email, hash]);
-    if (users.isEmpty) return null;
-    _currentUser = users.first;
-    await db.update('users', {'session_token': 'active'}, where: 'id = ?', whereArgs: [_currentUser!['id']]);
-    return _currentUser;
+    try {
+      final users = await _supabase.from('users').select()
+          .eq('email', email).eq('password_hash', _hash(password))
+          .timeout(const Duration(seconds: 30));
+      if (users.isEmpty) return null;
+      _currentUser = users.first as Map<String, dynamic>;
+      await _persistSession();
+      // Save FCM token after login
+      await _saveFcmToken();
+      return _currentUser;
+    } catch (e) {
+      _lastError = e.toString();
+      return null;
+    }
+  }
+
+  static Future<void> _saveFcmToken() async {
+    try {
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token != null && _currentUser != null) {
+        await updateFcmToken(_currentUser!['id'] as int, token);
+      }
+    } catch (_) {}
   }
 
   static Future<void> logout() async {
-    if (_currentUser != null) {
-      final db = await database;
-      await db.update('users', {'session_token': null}, where: 'id = ?', whereArgs: [_currentUser!['id']]);
-    }
+    try {
+      await _googleSignIn.signOut();
+    } catch (_) {}
+    await _clearSession();
     _currentUser = null;
+    _membersCache = null;
+    _settingsCache = null;
+  }
+
+  // ─── Sesion local por dispositivo ──────────────────────
+  // La sesion se guarda en el propio celular (SharedPreferences), no en un
+  // flag global de la base de datos, para que cada dispositivo tenga su
+  // propia sesion independiente.
+  static const String _sessionKey = 'logged_user_id';
+
+  static Future<void> _persistSession() async {
+    if (_currentUser == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_sessionKey, _currentUser!['id'] as int);
+  }
+
+  static Future<void> _clearSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_sessionKey);
   }
 
   static Future<void> restoreSession() async {
-    final db = await database;
-    final users = await db.query('users', where: 'session_token = ?', whereArgs: ['active'], limit: 1);
-    if (users.isNotEmpty) _currentUser = users.first;
+    final prefs = await SharedPreferences.getInstance();
+    final id = prefs.getInt(_sessionKey);
+    if (id == null) return;
+    try {
+      final users = await _supabase.from('users').select().eq('id', id);
+      if (users.isNotEmpty) {
+        _currentUser = users.first as Map<String, dynamic>;
+      } else {
+        await _clearSession();
+      }
+    } catch (_) {}
   }
 
   static Future<List<Map<String, dynamic>>> getUnlinkedMembers() async {
-    final db = await database;
-    return db.rawQuery('''
-      SELECT m.* FROM members m
-      LEFT JOIN users u ON u.member_id = m.id
-      WHERE u.id IS NULL AND m.is_active = 1
-      ORDER BY m.name
-    ''');
+    final r = await _supabase.rpc('get_unlinked_members');
+    return (r as List).cast<Map<String, dynamic>>();
   }
 
   static Future<List<Map<String, dynamic>>> getUsers() async {
-    final db = await database;
-    return db.rawQuery('''
-      SELECT u.*, m.name as member_name FROM users u
-      LEFT JOIN members m ON m.id = u.member_id
-      ORDER BY u.email
-    ''');
+    final data = await _supabase.from('users').select('*, members!left(name)').order('email');
+    return data.map((e) {
+      final m = e as Map<String, dynamic>;
+      m['member_name'] = (m.remove('members') as Map<String, dynamic>?)?['name'];
+      return m;
+    }).toList();
   }
 
   static Future<void> updateUserRole(int userId, String role) async {
-    final db = await database;
-    await db.update('users', {'role': role}, where: 'id = ?', whereArgs: [userId]);
+    await _supabase.from('users').update({'role': role}).eq('id', userId);
     if (_currentUser?['id'] == userId) _currentUser?['role'] = role;
   }
 
   static Future<void> updateUserMember(int userId, int? memberId) async {
-    final db = await database;
-    await db.update('users', {'member_id': memberId}, where: 'id = ?', whereArgs: [userId]);
+    await _supabase.from('users').update({'member_id': memberId}).eq('id', userId);
     if (_currentUser?['id'] == userId) _currentUser?['member_id'] = memberId;
   }
 
   static Future<List<Map<String, dynamic>>> getMyAttendance(int memberId) async {
-    final db = await database;
-    return db.rawQuery('''
-      SELECT r.date, r.start_time, r.end_time, a.arrival_time, a.status, a.late_minutes, a.fine_amount, a.collected
-      FROM attendance a JOIN rehearsals r ON a.rehearsal_id = r.id
-      WHERE a.member_id = ?
-      ORDER BY r.date DESC
-    ''', [memberId]);
+    final data = await _supabase.from('attendance').select('rehearsals!inner(date, start_time, end_time)')
+        .eq('member_id', memberId).order('date', referencedTable: 'rehearsals', ascending: false);
+    return data.map((e) {
+      final m = e as Map<String, dynamic>;
+      final rehearsal = m.remove('rehearsals') as Map<String, dynamic>;
+      m['date'] = rehearsal['date'];
+      m['start_time'] = rehearsal['start_time'];
+      m['end_time'] = rehearsal['end_time'];
+      return m;
+    }).toList();
   }
 
   static Future<List<Map<String, dynamic>>> getMyFines(int memberId) async {
-    final db = await database;
-    return db.rawQuery('''
-      SELECT mf.*, m.name as member_name FROM member_fines mf
-      JOIN members m ON m.id = mf.member_id
-      WHERE mf.member_id = ?
-      ORDER BY mf.created_at DESC
-    ''', [memberId]);
+    final data = await _supabase.from('member_fines').select('*, members!inner(name)').eq('member_id', memberId).order('created_at', ascending: false);
+    return data.map((e) {
+      final m = e as Map<String, dynamic>;
+      m['member_name'] = (m.remove('members') as Map<String, dynamic>)['name'];
+      return m;
+    }).toList();
   }
 
   static Future<Map<String, dynamic>> getMyStats(int memberId) async {
-    final db = await database;
-    final now = DateTime.now();
-    final m = now.month.toString().padLeft(2, '0');
-    final y = now.year.toString();
-    final result = await db.rawQuery('''
-      SELECT
-        COUNT(r.id) as total,
-        COALESCE(SUM(CASE WHEN a.status IN ('present','late') THEN 1 ELSE 0 END), 0) as attended,
-        COALESCE(SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END), 0) as late_count,
-        COALESCE(SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END), 0) as absent_count,
-        COALESCE(SUM(a.fine_amount), 0) as total_fines,
-        COALESCE(SUM(CASE WHEN a.collected = 1 THEN a.fine_amount ELSE 0 END), 0) as paid_fines
-      FROM members m
-      CROSS JOIN (SELECT id FROM rehearsals WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ? AND is_canceled = 0) r
-      LEFT JOIN attendance a ON a.member_id = m.id AND a.rehearsal_id = r.id
-      WHERE m.id = ?
-    ''', [m, y, memberId]);
-    return result.isNotEmpty ? result.first : {'total': 0, 'attended': 0, 'late_count': 0, 'absent_count': 0, 'total_fines': 0, 'paid_fines': 0};
+    final r = await _supabase.rpc('get_my_stats', params: {'p_member_id': memberId});
+    return r as Map<String, dynamic>;
   }
 
   // ─── Settings ──────────────────────────────────────────
-  static Future<Map<String, String>> getSettings() async {
-    final db = await database;
-    final rows = await db.query('settings');
+  // Igual que _membersCache: se consulta desde casi toda la app (calculo de
+  // tardanza, ajustes, correos autorizados) y rara vez cambia.
+  static Map<String, String>? _settingsCache;
+
+  static Future<Map<String, String>> getSettings({bool forceRefresh = false}) async {
+    if (!forceRefresh && _settingsCache != null) return _settingsCache!;
+    final rows = await _supabase.from('settings').select();
     final map = <String, String>{};
     for (final r in rows) map[r['key'] as String] = r['value'] as String;
+    _settingsCache = map;
     return map;
   }
 
   static Future<void> updateSetting(String key, String value) async {
-    final db = await database;
-    await db.insert('settings', {'key': key, 'value': value}, conflictAlgorithm: ConflictAlgorithm.replace);
+    await _supabase.from('settings').upsert({'key': key, 'value': value});
+    _settingsCache = null;
   }
 }

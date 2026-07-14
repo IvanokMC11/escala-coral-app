@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/database_service.dart';
+import '../widgets/common.dart';
 
 class AttendanceMatrixScreen extends StatefulWidget {
   const AttendanceMatrixScreen({super.key});
@@ -61,6 +62,9 @@ class _AttendanceMatrixScreenState extends State<AttendanceMatrixScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final monthName = DateFormat('MMMM yyyy', 'es').format(DateTime(_year, _month));
+    // Columna "Miembro" aprovecha mas ancho en pantallas grandes (tablet)
+    // en vez de quedar fija en 140px sin importar el dispositivo.
+    final memberColWidth = (MediaQuery.of(context).size.width * 0.35).clamp(120.0, 220.0);
 
     return Scaffold(
       appBar: AppBar(
@@ -73,33 +77,15 @@ class _AttendanceMatrixScreenState extends State<AttendanceMatrixScreen> {
         ? const Center(child: CircularProgressIndicator())
         : Column(
             children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3)),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    IconButton(icon: const Icon(Icons.chevron_left), onPressed: () => _changeMonth(-1)),
-                    GestureDetector(
-                      onTap: _pickDate,
-                      child: Row(children: [
-                        Text(monthName[0].toUpperCase() + monthName.substring(1), style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-                        const SizedBox(width: 6),
-                        Icon(Icons.arrow_drop_down, color: theme.colorScheme.primary),
-                      ]),
-                    ),
-                    IconButton(icon: const Icon(Icons.chevron_right), onPressed: () => _changeMonth(1)),
-                  ],
-                ),
+              MonthSelector(
+                label: monthName[0].toUpperCase() + monthName.substring(1),
+                onPrevious: () => _changeMonth(-1),
+                onNext: () => _changeMonth(1),
+                onLabelTap: _pickDate,
               ),
               Expanded(
                 child: _rehearsals.isEmpty
-                  ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(shape: BoxShape.circle, color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5)), child: Icon(Icons.calendar_month_outlined, size: 56, color: theme.colorScheme.onSurfaceVariant)),
-                      const SizedBox(height: 20),
-                      Text('Sin ensayos este mes', style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                    ]))
+                  ? const EmptyState(icon: Icons.calendar_month_outlined, title: 'Sin ensayos este mes')
                   : Scrollbar(
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.all(12),
@@ -112,7 +98,7 @@ class _AttendanceMatrixScreenState extends State<AttendanceMatrixScreen> {
                             columnSpacing: 6,
                             horizontalMargin: 8,
                             columns: [
-                              DataColumn(label: SizedBox(width: 140, child: Text('Miembro', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)))),
+                              DataColumn(label: SizedBox(width: memberColWidth, child: Text('Miembro', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)))),
                               ..._rehearsals.map((r) {
                                 final date = DateTime.tryParse(r['date']);
                                 final day = date?.day.toString() ?? '';
@@ -130,7 +116,7 @@ class _AttendanceMatrixScreenState extends State<AttendanceMatrixScreen> {
                               int attended = 0, lateCount = 0;
                               double fineTotal = 0;
                               return DataRow(cells: [
-                                DataCell(SizedBox(width: 140, child: Text(m['name'], style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))),
+                                DataCell(SizedBox(width: memberColWidth, child: Text(m['name'], style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))),
                                 ..._rehearsals.map((r) {
                                   final key = '${m['id']}_${r['id']}';
                                   final a = _attendance[key];

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../config/theme.dart';
 
 class AnimatedNavBar extends StatelessWidget {
   final int selectedIndex;
@@ -24,11 +25,21 @@ class AnimatedNavBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark ? AppColors.darkSurface : AppColors.surface;
+    final activeColor = AppColors.primary;
+    final inactiveColor = AppColors.textSecondary;
+
     return Container(
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.97),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 16, offset: const Offset(0, -4))],
+        color: bgColor,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.08),
+            blurRadius: 20,
+            offset: const Offset(0, -4),
+          ),
+        ],
       ),
       child: SafeArea(
         top: false,
@@ -54,13 +65,13 @@ class AnimatedNavBar extends StatelessWidget {
                             width: selectedIndex == i ? 44 : 36,
                             height: selectedIndex == i ? 44 : 36,
                             decoration: BoxDecoration(
-                              color: selectedIndex == i ? theme.colorScheme.primaryContainer : Colors.transparent,
-                              borderRadius: BorderRadius.circular(selectedIndex == i ? 12 : 8),
+                              color: selectedIndex == i ? activeColor.withValues(alpha: 0.12) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(selectedIndex == i ? 14 : 10),
                             ),
                             child: Center(
                               child: Icon(
                                 selectedIndex == i ? tabs[i].selectedIcon : tabs[i].icon,
-                                color: selectedIndex == i ? theme.colorScheme.onPrimaryContainer : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                                color: selectedIndex == i ? activeColor : inactiveColor.withValues(alpha: 0.6),
                                 size: selectedIndex == i ? 24 : 22,
                               ),
                             ),
@@ -71,9 +82,9 @@ class AnimatedNavBar extends StatelessWidget {
                             style: TextStyle(
                               fontSize: selectedIndex == i ? 11 : 10,
                               fontWeight: selectedIndex == i ? FontWeight.w600 : FontWeight.normal,
-                              color: selectedIndex == i ? theme.colorScheme.onPrimaryContainer : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                              color: selectedIndex == i ? activeColor : inactiveColor.withValues(alpha: 0.6),
                             ),
-                            child: Text(tabs[i].label),
+                            child: Text(tabs[i].label, maxLines: 1, overflow: TextOverflow.ellipsis, softWrap: false),
                           ),
                         ],
                       ),

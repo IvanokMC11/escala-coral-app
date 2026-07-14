@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../services/database_service.dart';
 import 'package:printing/printing.dart';
 import '../services/pdf_service.dart';
+import '../widgets/common.dart';
 
 class ReportsScreen extends StatefulWidget {
   const ReportsScreen({super.key});
@@ -17,6 +18,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
   List<Map<String, dynamic>> _top10 = [];
   List<Map<String, dynamic>> _memberStats = [];
   bool _loading = true;
+  bool _initialLoad = true;
   String? _error;
 
   @override
@@ -31,12 +33,16 @@ class _ReportsScreenState extends State<ReportsScreen> {
   Future<void> _load() async {
     setState(() { _loading = true; _error = null; });
     try {
-      _top10 = await DatabaseService.getTop10(_year, _month);
-      _memberStats = await DatabaseService.getMemberMonthlyStats(_year, _month);
+      final results = await Future.wait([
+        DatabaseService.getTop10(_year, _month),
+        DatabaseService.getMemberMonthlyStats(_year, _month),
+      ]);
+      _top10 = results[0];
+      _memberStats = results[1];
     } catch (e) {
       _error = 'Error al cargar datos';
     }
-    setState(() => _loading = false);
+    setState(() { _loading = false; _initialLoad = false; });
   }
 
   void _changeMonth(int delta) {
@@ -74,14 +80,10 @@ class _ReportsScreenState extends State<ReportsScreen> {
       appBar: AppBar(
         title: const Text('Reportes', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
       ),
-      body: _loading
+      body: _loading && _initialLoad
         ? const Center(child: CircularProgressIndicator())
         : _error != null
-          ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(shape: BoxShape.circle, color: theme.colorScheme.errorContainer.withValues(alpha: 0.5)), child: Icon(Icons.error_outline, size: 48, color: theme.colorScheme.error)),
-              const SizedBox(height: 16), Text(_error!, style: theme.textTheme.bodyLarge),
-              const SizedBox(height: 8), FilledButton(onPressed: _load, child: const Text('Reintentar')),
-            ]))
+          ? ErrorRetry(message: _error!, onRetry: _load)
           : RefreshIndicator(
               onRefresh: _load,
               child: SingleChildScrollView(
@@ -89,21 +91,10 @@ class _ReportsScreenState extends State<ReportsScreen> {
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   children: [
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(14),
-                        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(icon: const Icon(Icons.chevron_left), onPressed: () => _changeMonth(-1)),
-                          Text(monthName[0].toUpperCase() + monthName.substring(1), style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-                          IconButton(icon: const Icon(Icons.chevron_right), onPressed: () => _changeMonth(1)),
-                        ],
-                      ),
+                    MonthSelector(
+                      label: monthName[0].toUpperCase() + monthName.substring(1),
+                      onPrevious: () => _changeMonth(-1),
+                      onNext: () => _changeMonth(1),
                     ),
                     const SizedBox(height: 24),
                     if (_top10.isNotEmpty) ...[
@@ -115,11 +106,12 @@ class _ReportsScreenState extends State<ReportsScreen> {
                             const SizedBox(width: 8),
                             Text('TOP 10', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
                           ]),
-                          FilledButton.tonalIcon(
-                            icon: const Icon(Icons.picture_as_pdf, size: 18),
-                            label: const Text('Beca Comedor'),
-                            onPressed: _generatePdf,
-                          ),
+                          if (DatabaseService.isAdmin)
+                            FilledButton.tonalIcon(
+                              icon: const Icon(Icons.picture_as_pdf, size: 18),
+                              label: const Text('Beca Comedor'),
+                              onPressed: _generatePdf,
+                            ),
                         ],
                       ),
                       const SizedBox(height: 16),
@@ -186,7 +178,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                     Padding(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4), child: i < 3
                                       ? Icon([Icons.emoji_events, Icons.emoji_events, Icons.emoji_events][i], color: [Colors.amber, Colors.grey, Colors.brown][i], size: 18)
                                       : Text('${i + 1}', style: const TextStyle(fontSize: 13))),
-                                    Padding(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4), child: Text(r['member_name'], style: const TextStyle(fontSize: 14))),
+                                    Padding(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4), child: Text(r['member_name'], style: const TextStyle(fontSize: 14), maxLines: 1, overflow: TextOverflow.ellipsis)),
                                     Padding(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4), child: Text('${pct.toStringAsFixed(0)}%', style: TextStyle(fontWeight: FontWeight.bold, color: pct >= 90 ? Colors.green : pct >= 70 ? Colors.orange : Colors.red, fontSize: 14))),
                                     Padding(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4), child: Text('${r['total_late_minutes']}min', style: const TextStyle(fontSize: 12))),
                                     Padding(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4), child: Text('S/ ${(r['total_fine'] as num).toStringAsFixed(2)}', style: const TextStyle(fontSize: 12))),
@@ -199,18 +191,14 @@ class _ReportsScreenState extends State<ReportsScreen> {
                       ),
                     ],
                     if (_top10.isEmpty)
-                      Padding(padding: const EdgeInsets.all(32), child: Column(children: [
-                        Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(shape: BoxShape.circle, color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5)), child: Icon(Icons.bar_chart, size: 56, color: theme.colorScheme.onSurfaceVariant)),
-                        const SizedBox(height: 20),
-                        Text('Sin datos para este mes', style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                      ])),
+                      const EmptyState(icon: Icons.bar_chart, title: 'Sin datos para este mes'),
                     const SizedBox(height: 24),
                     Row(
                       children: [
                         Icon(Icons.people, size: 22, color: theme.colorScheme.primary),
                         const SizedBox(width: 8),
                         Expanded(child: Text('Detalle de miembros', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold))),
-                        if (_top10.isNotEmpty)
+                        if (_top10.isNotEmpty && DatabaseService.isAdmin)
                           TextButton.icon(
                             icon: const Icon(Icons.picture_as_pdf, size: 16),
                             label: const Text('PDF'),
@@ -241,7 +229,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                               final fine = (s['total_fine'] as num).toDouble();
                               final pct = total > 0 ? attended / total * 100 : 0.0;
                               return TableRow(children: [
-                                Padding(padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4), child: Text(s['name'] ?? '', style: const TextStyle(fontSize: 12))),
+                                Padding(padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4), child: Text(s['name'] ?? '', style: const TextStyle(fontSize: 12), maxLines: 1, overflow: TextOverflow.ellipsis)),
                                 Padding(padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4), child: Text(total > 0 ? '${pct.toStringAsFixed(0)}%' : '-', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: pct >= 90 ? Colors.green : pct >= 70 ? Colors.orange : Colors.red))),
                                 Padding(padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4), child: Text('$late', style: const TextStyle(fontSize: 12))),
                                 Padding(padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4), child: Text('S/ ${fine.toStringAsFixed(2)}', style: TextStyle(fontSize: 12, color: fine > 0 ? theme.colorScheme.error : null))),
