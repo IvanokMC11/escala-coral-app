@@ -20,3 +20,8 @@ mobile/.vscode/
 *.log
 .DS_Store
 Thumbs.db
+
+# Claude Code / agent skills (local tooling, no va al repo)
+.claude/
+.agents/
+skills-lock.json
